@@ -1,0 +1,21 @@
+# fljob.yaml (example)
+job_name: temp-fl-demo
+num_nodes: 3
+
+data:
+  num_samples_per_node: 800
+  num_features: 10
+  noise_std: 0.1
+  non_iid: true          # true면 노드마다 데이터 분포 다르게 생성
+  val_ratio: 0.2
+  seed: 42
+
+training:
+  rounds: 5
+  local_epochs: 1
+  batch_size: 128
+  lr: 0.01
+  weight_decay: 0.0
+  device: cpu            # "cpu" or "cuda"
+  seed: 42
+  log_every: 1

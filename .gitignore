@@ -1,0 +1,52 @@
+# ===== Secrets / Keys =====
+.env
+.env.*
+**/kaggle.json
+.kaggle/
+*.pem
+*.key
+*.crt
+secrets/
+config.local.*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+.DS_Store
+
+# ===== Project: real paths =====
+/data/
+
+# ===== Common ML artifacts (if created later) =====
+logs/
+log/
+runs/
+outputs/
+output/
+results/
+result/
+checkpoints/
+checkpoint/
+ckpt/
+wandb/
+mlruns/
+
+# ===== Model/artifact files (if created later) =====
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.joblib
+*.pkl
+*.log
