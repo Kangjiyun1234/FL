@@ -1,47 +1,51 @@
 # fl/aggregator.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, List, Tuple
-
 import torch
-
-from fl.model import SimpleRegressor
-
 
 StateDict = Dict[str, torch.Tensor]
 
 
-@dataclass
 class Aggregator:
-    in_dim: int
-    device: str
-
-    def __post_init__(self) -> None:
-        self.global_model = SimpleRegressor(in_dim=self.in_dim).to(self.device)
-
-    def get_global_state(self) -> StateDict:
-        return {k: v.detach().cpu().clone() for k, v in self.global_model.state_dict().items()}
-
-    def set_global_state(self, state: StateDict) -> None:
-        self.global_model.load_state_dict(state, strict=True)
-
-    def fedavg(self, client_states: List[Tuple[StateDict, int]]) -> StateDict:
+    """
+    FedAvg Aggregator (모델 비의존적)
+    """
+    
+    def aggregate(
+        self, 
+        client_states: List[Tuple[StateDict, int]]  # 🔴 타입 수정
+    ) -> StateDict:
         """
-        FedAvg: 샘플 수로 가중 평균.
-        client_states: [(state_dict, num_samples), ...]
+        FedAvg: 가중 평균 집계
+        
+        Args:
+            client_states: [(state_dict, num_samples), ...]
+        
+        Returns:
+            집계된 global state_dict
         """
-        total = sum(n for _, n in client_states)
-        if total <= 0:
-            raise ValueError("Total number of samples must be > 0")
-
-        # Initialize with zeros on CPU
-        keys = client_states[0][0].keys()
-        avg_state: StateDict = {k: torch.zeros_like(client_states[0][0][k]) for k in keys}
-
-        for state, n in client_states:
-            w = n / total
-            for k in keys:
-                avg_state[k] += state[k] * w
-
-        return avg_state
+        if not client_states:
+            raise ValueError("No client states to aggregate")
+        
+        # 🔴 튜플 언패킹
+        states = [state for state, _ in client_states]
+        weights = [num_samples for _, num_samples in client_states]
+        
+        total_samples = sum(weights)
+        
+        if total_samples == 0:
+            raise ValueError("Total samples is zero")
+        
+        # 가중 평균
+        global_state = {}
+        
+        for key in states[0].keys():
+            # 각 클라이언트의 파라미터를 가중치로 곱해서 합산
+            weighted_sum = sum(
+                state[key] * (w / total_samples) 
+                for state, w in zip(states, weights)
+            )
+            global_state[key] = weighted_sum
+        
+        return global_state

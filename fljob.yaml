@@ -1,21 +1,25 @@
-# fljob.yaml (example)
-job_name: temp-fl-demo
+job_name: "pump-sensor-fl"
 num_nodes: 3
 
 data:
-  num_samples_per_node: 800
-  num_features: 10
-  noise_std: 0.1
-  non_iid: true          # true면 노드마다 데이터 분포 다르게 생성
-  val_ratio: 0.2
+  dataset: "pump_sensor"
+  data_dir: "./data/pump-sensor-data"
+  sequence_length: 30
+  train_split: 0.8
   seed: 42
 
 training:
-  rounds: 5
-  local_epochs: 1
-  batch_size: 128
-  lr: 0.01
-  weight_decay: 0.0
-  device: cpu            # "cpu" or "cuda"
+  rounds: 10
+  local_epochs: 3
+  batch_size: 32
+  lr: 0.0001  # 🔴 0.001 → 0.0001로 줄임 (NaN 방지)
+  weight_decay: 0.0001
+  device: "cpu"
   seed: 42
   log_every: 1
+  
+  train_split: 0.8
+  sequence_length: 30
+  
+  hidden_size: 64
+  num_classes: 3
