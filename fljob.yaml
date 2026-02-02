@@ -1,25 +1,23 @@
-job_name: "pump-sensor-fl"
+job_name: "NASA Turbofan Engine Predictive Maintenance FL"
 num_nodes: 3
 
 data:
-  dataset: "pump_sensor"
-  data_dir: "./data/pump-sensor-data"
-  sequence_length: 30
-  train_split: 0.8
+  dataset: "nasa_turbofan"
+  data_dir: "./data"
+  nasa_dataset: "FD001"
   seed: 42
 
 training:
-  rounds: 10
-  local_epochs: 3
+  rounds: 20
+  local_epochs: 5
   batch_size: 32
-  lr: 0.0001  # 🔴 0.001 → 0.0001로 줄임 (NaN 방지)
+  lr: 0.0002
   weight_decay: 0.0001
   device: "cpu"
   seed: 42
-  log_every: 1
-  
+
   train_split: 0.8
-  sequence_length: 30
-  
+  sequence_length: 50
+
   hidden_size: 64
-  num_classes: 3
+  num_classes: 2

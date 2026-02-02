@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,13 @@ class DataConfig:
     # ===== 데이터셋 선택/경로 =====
     dataset: str = "synthetic"          # "synthetic" | "pump_sensor"
     data_dir: str = "./data"            # pump_sensor일 때 사용 (예: ./data/pump-sensor-data)
+
+    # ✅ 추가: CSV 파일을 직접 지정하고 싶을 때
+    # - 있으면 csv_path 우선
+    # - 없으면 data_dir에서 csv를 찾거나(네 data.py에서 구현) 기존 방식 사용
+    csv_path: Optional[str] = None
+
+    nasa_dataset: str = "FD001"  # FD001, FD002, FD003, FD004
 
     # ===== pump_sensor 시계열 옵션 =====
     sequence_length: int = 50           # 시계열 윈도우 길이
@@ -42,14 +50,16 @@ class TrainConfig:
     device: str = "cpu"
     seed: int = 42
     log_every: int = 1
-    
+
     # ===== 데이터 분할 (edge_node에서 사용) =====
     train_split: float = 0.8            # train/val 분할 비율
     sequence_length: int = 50           # 시계열 윈도우 (edge_node._prepare_dataset에서 필요)
 
     # ===== pump_sensor 분류 모델 옵션 =====
     hidden_size: int = 64               # LSTM hidden size
-    num_classes: int = 3                # NORMAL/BROKEN/RECOVERING 등
+
+    # ✅ 기본값 수정: Maintenance_Flag는 0/1 이므로 기본 2가 안전
+    num_classes: int = 2                # binary classification default
 
 
 @dataclass(frozen=True)
