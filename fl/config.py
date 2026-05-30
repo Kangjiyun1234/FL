@@ -1,70 +1,116 @@
-# fl/config.py
-from __future__ import annotations
-
+"""
+fl/config.py — FL + oneM2M 통합 설정
+FEMTO PRONOSTIA Bearing 데이터셋 (Raw Signal AE 버전)
+- 3 edge 노드 (mn1=Condition1/1800rpm, mn2=Condition2/1650rpm, mn3=Condition3/1500rpm)
+- Conv1DAE 기반 anomaly detection (정상만 학습)
+"""
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 
+# ════════════════════════════════════════════════════════
+# AE 모델 설정
+# ════════════════════════════════════════════════════════
+
 @dataclass(frozen=True)
-class DataConfig:
-    """
-    데이터 설정.
-    - synthetic: 기존 합성 회귀 데이터 생성용 파라미터 사용
-    - pump_sensor: CSV 로드 + 시계열 윈도우 생성용 파라미터 사용
-    """
-    # ===== 데이터셋 선택/경로 =====
-    dataset: str = "synthetic"          # "synthetic" | "pump_sensor"
-    data_dir: str = "./data"            # pump_sensor일 때 사용 (예: ./data/pump-sensor-data)
+class AEConfig:
+    seq_len:    int   = 2560    # vibration: 25.6kHz × 0.1sec (FEMTO PRONOSTIA)
+    n_channels: int   = 1       # 진동 1채널
+    latent_dim: int   = 32      # AE 병목 차원
 
-    # ✅ 추가: CSV 파일을 직접 지정하고 싶을 때
-    # - 있으면 csv_path 우선
-    # - 없으면 data_dir에서 csv를 찾거나(네 data.py에서 구현) 기존 방식 사용
-    csv_path: Optional[str] = None
 
-    nasa_dataset: str = "FD001"  # FD001, FD002, FD003, FD004
-
-    # ===== pump_sensor 시계열 옵션 =====
-    sequence_length: int = 50           # 시계열 윈도우 길이
-    train_split: float = 0.8            # train/val 분할 비율(노드 내부)
-
-    # ===== synthetic(기존) 옵션 =====
-    num_samples_per_node: int = 800     # 노드당 샘플 수
-    num_features: int = 10              # 입력 feature 수
-    noise_std: float = 0.1              # 노이즈 표준편차
-    non_iid: bool = True                # 노드별 분포 차이 유무
-    val_ratio: float = 0.2              # (synthetic에서) 검증 비율
-    seed: int = 42                      # 데이터 생성 시드
-
+# ════════════════════════════════════════════════════════
+# 학습 설정
+# ════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """
-    학습 설정.
-    - 공통 파라미터 + (pump_sensor 분류용) hidden_size/num_classes 포함
-    """
-    rounds: int = 5
-    local_epochs: int = 1
-    batch_size: int = 128
-    lr: float = 0.01
-    weight_decay: float = 0.0
-    device: str = "cpu"
-    seed: int = 42
-    log_every: int = 1
-
-    # ===== 데이터 분할 (edge_node에서 사용) =====
-    train_split: float = 0.8            # train/val 분할 비율
-    sequence_length: int = 50           # 시계열 윈도우 (edge_node._prepare_dataset에서 필요)
-
-    # ===== pump_sensor 분류 모델 옵션 =====
-    hidden_size: int = 64               # LSTM hidden size
-
-    # ✅ 기본값 수정: Maintenance_Flag는 0/1 이므로 기본 2가 안전
-    num_classes: int = 2                # binary classification default
+    rounds:       int   = 10
+    local_epochs: int   = 10
+    batch_size:   int   = 32
+    lr:           float = 1e-3
+    weight_decay: float = 1e-4
+    device:       str   = "cpu"
+    seed:         int   = 42
+    log_every:    int   = 1
+    train_split:  float = 0.8    # 레거시 필드 (AEEdgeNode에서는 미사용)
+    hidden_size:  int   = 128    # 레거시 필드
+    num_classes:  int   = 2      # 레거시 필드
 
 
-@dataclass(frozen=True)
-class FLJobConfig:
-    job_name: str
-    num_nodes: int
-    data: DataConfig
-    training: TrainConfig
+# ════════════════════════════════════════════════════════
+# 데이터 설정
+# ════════════════════════════════════════════════════════
+
+FEMTO_DATA_DIR = "/tmp/fl_data/femto"
+
+NODE_DATA_FILES = {
+    "mn1": os.path.join(FEMTO_DATA_DIR, "mn1.pkl"),
+    "mn2": os.path.join(FEMTO_DATA_DIR, "mn2.pkl"),
+    "mn3": os.path.join(FEMTO_DATA_DIR, "mn3.pkl"),
+}
+
+CLASS_NAMES  = ["정상", "이상"]
+NUM_CLASSES  = 2
+
+RMS_FAULT_THRESHOLD = 1.0    # g — first file exceeding this RMS = fault onset
+
+
+# ════════════════════════════════════════════════════════
+# Anomaly Detection 설정
+# ════════════════════════════════════════════════════════
+
+# 탐지 결정: 재구성 오차가 threshold를 K회 연속 초과하면 alarm
+ANOMALY_K_CONSECUTIVE = 3
+
+# threshold 결정 방법: val 정상 데이터 MSE 의 N 표준편차 위
+THRESHOLD_N_SIGMA = 3.0
+
+
+# ════════════════════════════════════════════════════════
+# oneM2M 연결 설정
+# ════════════════════════════════════════════════════════
+
+BASE_URL    = "http://127.0.0.1:3000"
+CSE_NAME    = "TinyIoT"
+MN_AE_NAME  = "MN-AE-1"
+IN_AE_NAME  = "IN-AE"
+NOTIFY_HOST = "127.0.0.1"
+
+NUM_CLIENTS   = 3
+GLOBAL_ROUNDS = 10    # TRAIN_CFG.rounds 와 동일하게 유지
+
+ORIGINATOR = "CAdmin"
+HEADERS = {
+    "X-M2M-Origin": ORIGINATOR,
+    "X-M2M-RVI":    "2a",
+    "Content-Type": "application/json;ty=4",
+    "Accept":       "application/json",
+}
+
+# ════════════════════════════════════════════════════════
+# 모델 저장 경로
+# ════════════════════════════════════════════════════════
+
+MODEL_BASE_DIR   = "/tmp/fl_models"
+LOCAL_MODEL_DIR  = os.path.join(MODEL_BASE_DIR, "local")
+GLOBAL_MODEL_DIR = os.path.join(MODEL_BASE_DIR, "global")
+
+os.makedirs(LOCAL_MODEL_DIR,  exist_ok=True)
+os.makedirs(GLOBAL_MODEL_DIR, exist_ok=True)
+
+# ════════════════════════════════════════════════════════
+# DP-SGD 설정
+# ════════════════════════════════════════════════════════
+
+DP_EPSILON       = 12.0
+DP_DELTA         = 5e-4
+DP_MAX_GRAD_NORM = 1.5
+
+# ════════════════════════════════════════════════════════
+# 인스턴스
+# ════════════════════════════════════════════════════════
+
+TRAIN_CFG = TrainConfig()
+AE_CFG    = AEConfig()

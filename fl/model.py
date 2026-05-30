@@ -1,252 +1,168 @@
 # fl/model.py
+# FEMTO PRONOSTIA Bearing 데이터셋용 모델
 
 import torch
 import torch.nn as nn
 
 
-class TurbofanLSTM(nn.Module):
+# ════════════════════════════════════════════════════════
+# Conv1D Autoencoder (raw 시계열 anomaly detection용)
+# ════════════════════════════════════════════════════════
+
+class Conv1DAE(nn.Module):
     """
-    NASA Turbofan용 LSTM 모델
-    시계열 전체를 활용하여 RUL/Maintenance 예측
+    1D CNN Autoencoder — 정상 신호 재구성 학습, 재구성 오차로 anomaly 탐지
+
+    입력:  (batch, n_channels, seq_len)
+    출력:  (batch, n_channels, seq_len) — 재구성 신호
+
+    seq_len에 무관하게 동작 (인코더 출력 크기를 동적으로 계산).
+
+    동작 확인된 seq_len:
+      seq_len=2000  (current  2kHz × 1sec)
+      seq_len=12000 (vibration 4kHz × 3sec)
     """
 
     def __init__(
         self,
-        input_size: int,
-        hidden_size: int = 64,
-        num_classes: int = 2,
-        num_layers: int = 2,
-        dropout: float = 0.3,
+        n_channels: int = 1,
+        latent_dim: int = 64,
+        seq_len:    int = 12000,
     ):
         super().__init__()
+        self.n_channels = n_channels
+        self.latent_dim = latent_dim
+        self.seq_len    = seq_len
 
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
+        # ── Encoder conv ──
+        self.encoder_conv = nn.Sequential(
+            nn.Conv1d(n_channels, 32, kernel_size=16, stride=4),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+
+            nn.Conv1d(32, 64, kernel_size=8, stride=4),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+
+            nn.Conv1d(64, 128, kernel_size=4, stride=2),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
         )
 
-        self.dropout = nn.Dropout(dropout)
-        self.bn = nn.BatchNorm1d(hidden_size)
-        self.fc = nn.Linear(hidden_size, num_classes)
+        # 인코더 각 Conv1d 레이어의 출력 크기를 기록 (output_padding 역산용)
+        enc_sizes = [seq_len]   # [seq_len, L1, L2, L3]
+        with torch.no_grad():
+            x = torch.zeros(1, n_channels, seq_len)
+            for layer in self.encoder_conv:
+                x = layer(x)
+                if isinstance(layer, nn.Conv1d):
+                    enc_sizes.append(int(x.shape[2]))
+
+        self._enc_ch   = int(x.shape[1])   # 128
+        self._enc_len  = int(x.shape[2])   # L3
+        self._enc_flat = self._enc_ch * self._enc_len
+
+        # ── Encoder FC ──
+        self.encoder_fc = nn.Linear(self._enc_flat, latent_dim)
+
+        # ── Decoder FC ──
+        self.decoder_fc = nn.Linear(latent_dim, self._enc_flat)
+
+        # ── Decoder ConvTranspose: output_padding = target - (in-1)*stride - kernel ──
+        # enc_sizes = [seq_len, L1, L2, L3]
+        # decoder layer1: L3 → L2,  layer2: L2 → L1,  layer3: L1 → seq_len
+        targets = list(reversed(enc_sizes[:-1]))   # [L2, L1, seq_len]
+        inputs  = list(reversed(enc_sizes[1:]))    # [L3, L2, L1]
+        specs   = [(4, 2), (8, 4), (16, 4)]        # (kernel, stride) 각 레이어
+
+        ops = []
+        for (k, s), in_len, tgt in zip(specs, inputs, targets):
+            op = tgt - (in_len - 1) * s - k
+            assert 0 <= op < s, (
+                f"output_padding={op} out of range for stride={s} "
+                f"(in={in_len}, target={tgt}, k={k})"
+            )
+            ops.append(op)
+
+        self.decoder_conv = nn.Sequential(
+            nn.ConvTranspose1d(128, 64, kernel_size=4,  stride=2, output_padding=ops[0]),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+
+            nn.ConvTranspose1d(64, 32,  kernel_size=8,  stride=4, output_padding=ops[1]),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+
+            nn.ConvTranspose1d(32, n_channels, kernel_size=16, stride=4, output_padding=ops[2]),
+        )
 
         self._init_weights()
 
     def _init_weights(self):
-        """가중치 초기화"""
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.ConvTranspose1d)):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
-            # LSTM weight
-            if "lstm" in name and "weight_ih" in name:
-                nn.init.xavier_uniform_(param)
-            elif "lstm" in name and "weight_hh" in name:
-                nn.init.orthogonal_(param)
-            
-            # Linear weight
-            elif "fc" in name and "weight" in name:
-                nn.init.xavier_uniform_(param)
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, C, L) → latent: (B, latent_dim)"""
+        h = self.encoder_conv(x)
+        h = h.flatten(1)
+        return self.encoder_fc(h)
 
-            # Bias
-            elif "bias" in name:
-                nn.init.constant_(param, 0.01)
-
-            # BatchNorm
-            elif "weight" in name and param.dim() == 1:
-                nn.init.ones_(param)
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """z: (B, latent_dim) → (B, C, L)"""
+        h = self.decoder_fc(z)
+        h = h.view(-1, self._enc_ch, self._enc_len)
+        return self.decoder_conv(h)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: (batch, seq_len, input_size) = (batch, 50, 14)
-        
-        🔥 전체 시퀀스 활용!
+        x: (B, C, L)  또는  (B, L) — 1채널 생략 허용
+        반환: (B, C, L)
         """
-        # LSTM: 모든 타임스텝 처리
-        lstm_out, (h_n, c_n) = self.lstm(x)
-        # lstm_out: (batch, seq_len, hidden_size)
-        # h_n: (num_layers, batch, hidden_size)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        return self.decode(self.encode(x))
 
-        # 마지막 타임스텝의 hidden state 사용
-        last_hidden = lstm_out[:, -1, :]  # (batch, hidden_size)
-
-        # BatchNorm (batch > 1일 때만)
-        if last_hidden.size(0) > 1:
-            last_hidden = self.bn(last_hidden)
-
-        last_hidden = self.dropout(last_hidden)
-        out = self.fc(last_hidden)  # (batch, num_classes)
-        
-        return out
+    def reconstruction_error(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, L) or (B, C, L) → 샘플별 MSE (B,)
+        """
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        recon = self.forward(x)
+        return ((x - recon) ** 2).mean(dim=(1, 2))
 
 
-class PumpMaintenanceClassifier(nn.Module):
-    """
-    펌프 유지보수 예측 분류기 (MLP)
-    입력: 6개 센서 값 (Temperature, Vibration, Pressure, Flow_Rate, RPM, Operational_Hours)
-    출력: 2개 클래스 (정상=0, 유지보수 필요=1)
-    """
+# ════════════════════════════════════════════════════════
+# 레거시 MLP (미사용)
+# ════════════════════════════════════════════════════════
 
-    def __init__(
-        self,
-        input_size: int = 6,
-        hidden_size: int = 64,
-        num_classes: int = 2,
-        dropout: float = 0.3,
-    ):
+class MachineryMLP(nn.Module):
+    """레거시: 통계 피처 벡터 → 5클래스 분류 (현재 미사용)"""
+
+    def __init__(self, input_size, hidden_size=128, num_classes=5, dropout=0.3):
         super().__init__()
-
         self.network = nn.Sequential(
-            # Layer 1
             nn.Linear(input_size, hidden_size * 2),
-            nn.BatchNorm1d(hidden_size * 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            
-            # Layer 2
+            nn.BatchNorm1d(hidden_size * 2), nn.ReLU(), nn.Dropout(dropout),
             nn.Linear(hidden_size * 2, hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            
-            # Layer 3
+            nn.BatchNorm1d(hidden_size), nn.ReLU(), nn.Dropout(dropout),
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.BatchNorm1d(hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout / 2),
-            
-            # Output
-            nn.Linear(hidden_size // 2, num_classes)
+            nn.BatchNorm1d(hidden_size // 2), nn.ReLU(), nn.Dropout(dropout / 2),
+            nn.Linear(hidden_size // 2, num_classes),
         )
 
-        self._init_weights()
-
-    def _init_weights(self):
-        """Kaiming 초기화 (ReLU에 최적)"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0.01)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (batch, seq_len, input_size) 또는 (batch, input_size)
-        """
-        # 3D 텐서면 중간 차원 제거
+    def forward(self, x):
         if x.dim() == 3:
-            if x.size(1) == 1:
-                x = x.squeeze(1)  # (batch, 1, 6) → (batch, 6)
-            else:
-                # seq_len > 1이면 마지막 시점만 사용 (backward compatibility)
-                x = x[:, -1, :]
-        
-        return self.network(x)
-
-class PumpSensorModel(nn.Module):
-    """시계열용 LSTM 모델 (sequence_length > 1)"""
-
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int = 64,
-        num_classes: int = 2,
-        dropout: float = 0.3,
-    ):
-        super().__init__()
-
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=2,
-            batch_first=True,
-            dropout=dropout if dropout > 0 else 0.0,
-        )
-
-        self.dropout = nn.Dropout(dropout)
-        self.bn = nn.BatchNorm1d(hidden_size)
-        self.fc = nn.Linear(hidden_size, num_classes)
-
-        self._init_weights()
-
-    def _init_weights(self):
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-
-            if "lstm" in name and "weight_ih" in name:
-                nn.init.xavier_uniform_(param)
-            elif "lstm" in name and "weight_hh" in name:
-                nn.init.orthogonal_(param)
-            elif "fc" in name and "weight" in name:
-                nn.init.xavier_uniform_(param)
-            elif "bias" in name:
-                nn.init.constant_(param, 0.01)
-            elif "weight" in name and param.dim() == 1:
-                nn.init.ones_(param)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len, input_size)
-        lstm_out, _ = self.lstm(x)
-        last_hidden = lstm_out[:, -1, :]
-
-        if last_hidden.size(0) > 1:
-            last_hidden = self.bn(last_hidden)
-
-        last_hidden = self.dropout(last_hidden)
-        out = self.fc(last_hidden)
-        return out
-
-
-class SimpleMLP(nn.Module):
-    """
-    시퀀스가 아닌 단일 시점 데이터용 MLP
-    sequence_length=1일 때 사용
-    """
-
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int = 64,
-        num_classes: int = 2,
-        dropout: float = 0.3,
-    ):
-        super().__init__()
-
-        self.network = nn.Sequential(
-            nn.Linear(input_size, hidden_size * 2),
-            nn.BatchNorm1d(hidden_size * 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_size, num_classes)
-        )
-
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0.01)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, 1, input_size) → squeeze
-        if x.dim() == 3 and x.size(1) == 1:
-            x = x.squeeze(1)  # (batch, input_size)
-        
+            x = x.squeeze(1)
         return self.network(x)

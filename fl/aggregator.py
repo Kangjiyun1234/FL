@@ -14,7 +14,7 @@ class Aggregator:
     
     def aggregate(
         self, 
-        client_states: List[Tuple[StateDict, int]]  # 🔴 타입 수정
+        client_states: List[Tuple[StateDict, int]]  #타입 수정
     ) -> StateDict:
         """
         FedAvg: 가중 평균 집계
@@ -28,7 +28,7 @@ class Aggregator:
         if not client_states:
             raise ValueError("No client states to aggregate")
         
-        # 🔴 튜플 언패킹
+        #튜플 언패킹
         states = [state for state, _ in client_states]
         weights = [num_samples for _, num_samples in client_states]
         

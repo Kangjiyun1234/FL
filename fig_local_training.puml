@@ -1,0 +1,113 @@
+@startuml fig_local_training
+
+skinparam roundCorner 0
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 11
+
+skinparam sequence {
+    ParticipantBackgroundColor #C8DCF0
+    ParticipantFontColor black
+    ParticipantBorderColor #7BA7C7
+    ParticipantFontSize 11
+    ArrowColor #333333
+    ArrowFontSize 10
+    ArrowFontColor #333333
+    LifeLineBorderColor #AAAAAA
+    ActivationBorderColor #7BA7C7
+    ActivationBackgroundColor #C8DCF0
+    NoteBackgroundColor #D6EAF8
+    NoteBorderColor #7BA7C7
+    NoteFontSize 10
+    BoxBackgroundColor #EEF5FB
+    BoxBorderColor #7BA7C7
+    BoxFontColor #333333
+    BoxFontSize 11
+}
+
+box "Factory A" #EBF5FB
+    participant "MN-AE1"  as MNAE1
+    participant "MN-CSE1" as MNCSE1
+end box
+
+box "Factory B" #EBF5FB
+    participant "MN-AE2"  as MNAE2
+    participant "MN-CSE2" as MNCSE2
+end box
+
+box "Factory C" #EBF5FB
+    participant "MN-AE3"  as MNAE3
+    participant "MN-CSE3" as MNCSE3
+end box
+
+box "Cloud Service Platform" #FEF9E7
+    participant "IN-CSE" as INCSE
+    participant "IN-AE"  as INAE
+end box
+
+' Step 1
+MNAE1 -> MNCSE1 : 1-1
+note right
+  Retrieve latest contentInstance
+  from cnt-sensor-data
+end note
+
+MNAE2 -> MNCSE2 : 1-2
+note right
+  Retrieve latest contentInstance
+  from cnt-sensor-data
+end note
+
+MNAE3 -> MNCSE3 : 1-3
+note right
+  Retrieve latest contentInstance
+  from cnt-sensor-data
+end note
+
+' Step 2
+MNAE1 -> MNAE1 : 2-1
+note right
+  Train local model using
+  sensor data + global model
+end note
+
+MNAE2 -> MNAE2 : 2-2
+note right
+  Train local model using
+  sensor data + global model
+end note
+
+MNAE3 -> MNAE3 : 2-3
+note right
+  Train local model using
+  sensor data + global model
+end note
+
+' Step 3
+MNAE1 -> INCSE : 3-1
+note right
+  Create contentInstance
+  under cnt-local-updates/cnt-mn1:
+  - node, round, model_path,
+    num_samples, train_loss,
+    val_loss, val_auroc, timestamp
+end note
+
+MNAE2 -> INCSE : 3-2
+note right
+  Create contentInstance
+  under cnt-local-updates/cnt-mn2:
+  - node, round, model_path,
+    num_samples, train_loss,
+    val_loss, val_auroc, timestamp
+end note
+
+MNAE3 -> INCSE : 3-3
+note right
+  Create contentInstance
+  under cnt-local-updates/cnt-mn3:
+  - node, round, model_path,
+    num_samples, train_loss,
+    val_loss, val_auroc, timestamp
+end note
+
+@enduml

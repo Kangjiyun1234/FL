@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FL Bearing Fault Detection</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #ffffff;
+    --bg2:      #f7f7f5;
+    --bg3:      #f0efe9;
+    --text:     #1a1a18;
+    --text2:    #6b6b67;
+    --text3:    #9a9994;
+    --border:   rgba(0,0,0,0.10);
+    --border2:  rgba(0,0,0,0.18);
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --ok-bg:    #eaf3de; --ok-text:  #27500a; --ok-bar:   #1d9e75;
+    --tr-bg:    #e6f1fb; --tr-text:  #0c447c; --tr-bar:   #378add;
+    --fd-bg:    #fcebeb; --fd-text:  #791f1f; --fd-bar:   #e24b4a;
+    --fault-line: #e24b4a;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:      #1c1c1a;
+      --bg2:     #252522;
+      --bg3:     #2e2e2b;
+      --text:    #f0efe9;
+      --text2:   #9a9994;
+      --text3:   #6b6b67;
+      --border:  rgba(255,255,255,0.10);
+      --border2: rgba(255,255,255,0.18);
+      --ok-bg:   #173404; --ok-text: #c0dd97; --ok-bar:  #1d9e75;
+      --tr-bg:   #042c53; --tr-text: #b5d4f4; --tr-bar:  #378add;
+      --fd-bg:   #501313; --fd-text: #f7c1c1; --fd-bar:  #e24b4a;
+    }
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+    background: var(--bg3);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  .root { max-width: 960px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+
+  .topbar { display: flex; justify-content: space-between; align-items: center; }
+  .logo-title { font-size: 17px; font-weight: 600; color: var(--text); letter-spacing: -0.02em; }
+  .logo-sub   { font-size: 12px; color: var(--text2); margin-top: 2px; }
+
+  .round-pill {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 14px; border-radius: 20px;
+    border: 0.5px solid var(--border2);
+    background: var(--bg);
+  }
+  .pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); transition: background 0.3s; flex-shrink: 0; }
+  .pill-dot.active { background: var(--ok-bar); animation: pulse 1.6s ease-in-out infinite; }
+  .pill-dot.alert  { background: var(--fault-line); animation: pulse 0.8s ease-in-out infinite; }
+  .pill-dot.conn   { background: var(--tr-bar); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.35; }
+  }
+  .pill-label { font-size: 12px; font-weight: 500; color: var(--text); }
+  .pill-sub   { font-size: 11px; color: var(--text2); }
+
+  .section-label {
+    font-size: 10px; font-weight: 600; color: var(--text2);
+    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px;
+  }
+
+  .nodes-row { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+
+  .node {
+    background: var(--bg);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 14px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.35s;
+  }
+  .node::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: var(--border); transition: background 0.35s;
+  }
+  .node.ok::before        { background: var(--ok-bar); }
+  .node.training::before  { background: var(--tr-bar); }
+  .node.fault::before     { background: var(--fd-bar); }
+
+  .node-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+  .node-name   { font-size: 20px; font-weight: 600; color: var(--text); }
+  .node-badge  { font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 10px; }
+  .node-badge.ok       { background: var(--ok-bg); color: var(--ok-text); }
+  .node-badge.training { background: var(--tr-bg); color: var(--tr-text); }
+  .node-badge.fault    { background: var(--fd-bg); color: var(--fd-text); }
+  .node-role { font-size: 11px; color: var(--text2); margin-bottom: 4px; }
+  .node-stat { font-size: 11px; color: var(--text3); }
+
+  .progress-wrap {
+    background: var(--bg); border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px 18px;
+  }
+  .round-info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .round-num  { font-size: 26px; font-weight: 600; color: var(--text); }
+  .round-of   { font-size: 13px; color: var(--text2); margin-left: 4px; }
+  .phase-label {
+    font-size: 11px; color: var(--text2);
+    padding: 3px 10px; border: 0.5px solid var(--border2); border-radius: 10px;
+  }
+  .track  { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; margin-bottom: 10px; }
+  .fill   { height: 100%; border-radius: 3px; background: var(--tr-bar); transition: width 0.6s cubic-bezier(.4,0,.2,1), background 0.4s; }
+  .dots   { display: flex; gap: 6px; flex-wrap: wrap; }
+  .dot {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 0.5px solid var(--border2);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--text2); transition: all 0.3s;
+  }
+  .dot.done { background: var(--ok-bar);  border-color: var(--ok-bar);  color: #fff; }
+  .dot.cur  { background: var(--tr-bg);   border-color: var(--tr-bar);  color: var(--tr-text); font-weight: 600; }
+  .dot.bad  { background: var(--fd-bar);  border-color: var(--fd-bar);  color: #fff; }
+
+  .charts-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+
+  .chart-card {
+    background: var(--bg); border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg); padding: 14px 16px;
+    transition: border-color 0.4s;
+  }
+  .chart-card.hl     { border-color: var(--tr-bar); }
+  .chart-card.hl-red { border-color: var(--fault-line); border-width: 1px; }
+
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+  .chart-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .chart-cold { font-size: 10px; font-weight: 500; color: var(--tr-bar); margin-left: 4px; }
+  .chart-tag  { font-size: 10px; color: var(--text3); }
+  .live-val   { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 8px; transition: color 0.3s; }
+  .live-val.danger { color: #a32d2d; }
+
+  .auroc-row { display: flex; gap: 12px; margin-bottom: 8px; }
+  .auroc-chip { font-size: 10px; color: var(--text2); }
+  .auroc-chip span { font-weight: 600; color: var(--text); }
+
+  /* ── 상단 고정 배너 ── */
+  .fault-banner {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+    background: var(--fd-bar); color: #fff;
+    padding: 11px 24px;
+    align-items: center; gap: 12px;
+    box-shadow: 0 2px 16px rgba(226,75,74,0.45);
+  }
+  .fault-banner.show {
+    display: flex;
+    animation: bannerDown 0.35s cubic-bezier(.2,0,.2,1);
+  }
+  @keyframes bannerDown {
+    from { transform: translateY(-100%); opacity: 0; }
+    to   { transform: translateY(0);     opacity: 1; }
+  }
+  .banner-icon { font-size: 18px; flex-shrink: 0; }
+  .banner-main { flex: 1; }
+  .banner-title { font-size: 13px; font-weight: 700; letter-spacing: -0.01em; }
+  .banner-detail { font-size: 11px; opacity: 0.85; margin-top: 1px; }
+  .banner-close {
+    background: none; border: none; color: #fff; cursor: pointer;
+    font-size: 18px; opacity: 0.7; padding: 0 4px; line-height: 1;
+  }
+  .banner-close:hover { opacity: 1; }
+
+  /* ── mn3 카드 흔들림 + glow ── */
+  @keyframes shake {
+    0%,100% { transform: translateX(0); }
+    15%     { transform: translateX(-7px); }
+    30%     { transform: translateX(7px); }
+    45%     { transform: translateX(-5px); }
+    60%     { transform: translateX(5px); }
+    75%     { transform: translateX(-3px); }
+  }
+  .chart-card.hl-red {
+    border-color: var(--fault-line) !important; border-width: 1px;
+    box-shadow: 0 0 0 3px rgba(226,75,74,0.18), 0 4px 24px rgba(226,75,74,0.22);
+    animation: shake 0.5s ease;
+  }
+  .node.fault {
+    box-shadow: 0 0 0 2px var(--fd-bar), 0 4px 20px rgba(226,75,74,0.28);
+    animation: shake 0.5s ease;
+  }
+
+  /* ── 카드 내 alert strip ── */
+  .alert-strip {
+    display: none; flex-direction: column; gap: 4px;
+    margin-top: 10px; padding: 10px 12px;
+    background: var(--fd-bg); border-radius: var(--radius-md);
+    border: 0.5px solid #f09595;
+  }
+  .alert-strip.show { display: flex; }
+  .alert-strip-top { display: flex; align-items: center; justify-content: space-between; }
+  .alert-text { font-size: 12px; font-weight: 700; color: var(--fd-text); }
+  .alert-chip {
+    font-size: 10px; background: var(--fault-line); color: #fff;
+    padding: 2px 8px; border-radius: 8px; font-weight: 700;
+    animation: pulse 0.8s ease-in-out infinite;
+  }
+  .alert-detail { font-size: 10px; color: var(--fd-text); opacity: 0.75; line-height: 1.5; }
+
+  /* ── Summary 모달 ── */
+  .summary-overlay {
+    display: none; position: fixed; inset: 0; z-index: 300;
+    background: rgba(0,0,0,0.50);
+    align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .summary-overlay.show { display: flex; animation: fadeIn 0.25s; }
+  @keyframes fadeIn { from { opacity:0; transform:scale(0.97); } to { opacity:1; transform:scale(1); } }
+
+  .summary-modal {
+    background: var(--bg); border-radius: var(--radius-lg);
+    border: 0.5px solid var(--border2); padding: 28px 28px 22px;
+    max-width: 700px; width: 100%;
+    max-height: 88vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.30);
+  }
+  .summary-header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 20px;
+  }
+  .summary-title { font-size: 17px; font-weight: 700; color: var(--text); }
+  .summary-sub   { font-size: 12px; color: var(--text2); margin-top: 3px; }
+  .summary-close {
+    background: none; border: none; color: var(--text2); cursor: pointer;
+    font-size: 20px; padding: 0; line-height: 1;
+  }
+  .summary-close:hover { color: var(--text); }
+
+  .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+  .summary-node-card {
+    background: var(--bg2); border-radius: var(--radius-md);
+    border: 0.5px solid var(--border); padding: 14px;
+  }
+  .summary-node-name { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 10px; }
+  .summary-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; margin-bottom: 5px; }
+  .summary-key { color: var(--text2); }
+  .summary-val { font-weight: 600; color: var(--text); }
+  .summary-val.good { color: var(--ok-bar); }
+  .summary-val.warn { color: #e24b4a; }
+  .summary-footer { font-size: 10px; color: var(--text3); text-align: right; }
+
+  .ctrl {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--bg); border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg); padding: 12px 16px;
+  }
+  .conn-label { font-size: 12px; font-weight: 500; color: var(--text2); }
+  .sep { flex: 1; }
+  .btn {
+    font-size: 12px; padding: 6px 14px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius-md);
+    background: var(--bg2); color: var(--text);
+    cursor: pointer; transition: background 0.15s; font-weight: 500;
+  }
+  .btn:hover { background: var(--bg3); }
+
+  @media (max-width: 760px) {
+    body { padding: 16px; }
+    .topbar, .round-info, .ctrl {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+    .round-pill { width: 100%; }
+    .sep { display: none; }
+    .nodes-row, .charts-grid, .summary-grid {
+      grid-template-columns: 1fr;
+    }
+    .summary-modal { padding: 20px 18px 18px; }
+    .fault-banner { padding: 10px 16px; }
+  }
+</style>
+</head>
+<body>
+<!-- 상단 고정 배너 -->
+<div class="fault-banner" id="fault-banner">
+  <span class="banner-icon">⚠</span>
+  <div class="banner-main">
+    <div class="banner-title" id="banner-title">Bearing Fault Detected — mn3</div>
+    <div class="banner-detail" id="banner-detail">Anomaly confirmed</div>
+  </div>
+  <button class="banner-close" id="banner-close" title="닫기">✕</button>
+</div>
+
+<!-- Summary 모달 -->
+<div class="summary-overlay" id="summary-overlay">
+  <div class="summary-modal">
+    <div class="summary-header">
+      <div>
+        <div class="summary-title">✓ FL Training Complete</div>
+        <div class="summary-sub" id="summary-sub">Final Evaluation — Global Model Round —</div>
+      </div>
+      <button class="summary-close" id="summary-close">✕</button>
+    </div>
+    <div class="summary-grid" id="summary-grid"></div>
+    <div class="summary-footer">
+      Threshold = val normal MSE μ + 3σ &nbsp;·&nbsp; Detection: K=3 consecutive exceedances
+    </div>
+  </div>
+</div>
+
+<div class="root">
+
+  <!-- 헤더 -->
+  <div class="topbar">
+    <div>
+      <div class="logo-title">Bearing Fault Detection</div>
+      <div class="logo-sub">Federated Learning · oneM2M · Conv1DAE</div>
+    </div>
+    <div class="round-pill">
+      <div class="pill-dot" id="pill-dot"></div>
+      <span class="pill-label" id="pill-label">Connecting…</span>
+      <span class="pill-sub" id="pill-sub">Round — / —</span>
+    </div>
+  </div>
+
+  <!-- 노드 상태 -->
+  <div>
+    <div class="section-label">Edge nodes</div>
+    <div class="nodes-row">
+      <div class="node ok" id="nd-mn1">
+        <div class="node-header">
+          <span class="node-name">mn1</span>
+          <span class="node-badge ok" id="nb-mn1">Normal</span>
+        </div>
+        <div class="node-role">Normal Support · 1800 rpm</div>
+        <div class="node-stat" id="ns-mn1">Bearing1_1</div>
+      </div>
+      <div class="node ok" id="nd-mn2">
+        <div class="node-header">
+          <span class="node-name">mn2</span>
+          <span class="node-badge ok" id="nb-mn2">Normal</span>
+        </div>
+        <div class="node-role">Normal Support · 1650 rpm</div>
+        <div class="node-stat" id="ns-mn2">Bearing2_2</div>
+      </div>
+      <div class="node ok" id="nd-mn3">
+        <div class="node-header">
+          <span class="node-name">mn3</span>
+          <span class="node-badge ok" id="nb-mn3">Monitoring</span>
+        </div>
+        <div class="node-role">Fault-Transition · 1500 rpm</div>
+        <div class="node-stat" id="ns-mn3">Bearing3_2 · live stream</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 라운드 진행 -->
+  <div class="progress-wrap">
+    <div class="round-info">
+      <div>
+        <span class="round-num" id="rnum">0</span>
+        <span class="round-of" id="rof">/ — rounds</span>
+      </div>
+      <span class="phase-label" id="phase-label">Waiting for FL…</span>
+    </div>
+    <div class="track"><div class="fill" id="rfill" style="width:0%"></div></div>
+    <div class="dots" id="dots"></div>
+  </div>
+
+  <!-- 차트 -->
+  <div>
+    <div class="section-label">Reconstruction error (MSE) — live stream</div>
+    <div class="charts-grid">
+
+      <div class="chart-card hl" id="cc-mn1">
+        <div class="chart-head">
+          <span class="chart-name">mn1</span>
+          <span class="chart-tag" id="thr-mn1">threshold —</span>
+        </div>
+        <div class="live-val" id="lv-mn1">—</div>
+        <div class="auroc-row">
+          <span class="auroc-chip">AUROC <span id="au-mn1">—</span></span>
+          <span class="auroc-chip">val_loss <span id="vl-mn1">—</span></span>
+        </div>
+        <div style="position:relative;height:100px;"><canvas id="c-mn1"></canvas></div>
+      </div>
+
+      <div class="chart-card hl" id="cc-mn2">
+        <div class="chart-head">
+          <span class="chart-name">mn2</span>
+          <span class="chart-tag" id="thr-mn2">threshold —</span>
+        </div>
+        <div class="live-val" id="lv-mn2">—</div>
+        <div class="auroc-row">
+          <span class="auroc-chip">AUROC <span id="au-mn2">—</span></span>
+          <span class="auroc-chip">val_loss <span id="vl-mn2">—</span></span>
+        </div>
+        <div style="position:relative;height:100px;"><canvas id="c-mn2"></canvas></div>
+      </div>
+
+      <div class="chart-card hl" id="cc-mn3">
+        <div class="chart-head">
+          <span class="chart-name">mn3 <span class="chart-cold">cold-start</span></span>
+          <span class="chart-tag" id="thr-mn3">threshold —</span>
+        </div>
+        <div class="live-val" id="lv-mn3">—</div>
+        <div class="auroc-row">
+          <span class="auroc-chip">AUROC <span id="au-mn3">—</span></span>
+          <span class="auroc-chip">val_loss <span id="vl-mn3">—</span></span>
+        </div>
+        <div style="position:relative;height:100px;"><canvas id="c-mn3"></canvas></div>
+        <div class="alert-strip" id="alert-strip">
+          <div class="alert-strip-top">
+            <span class="alert-text">⚠ Fault Detected</span>
+            <span class="alert-chip">ALERT</span>
+          </div>
+          <div class="alert-detail" id="alert-detail">분석 중…</div>
+        </div>
+      </div>
+
+      <div class="chart-card" id="cc-loss">
+        <div class="chart-head">
+          <span class="chart-name">Global train loss</span>
+          <span class="chart-tag">FedAvg convergence</span>
+        </div>
+        <div class="live-val" id="lv-loss">—</div>
+        <div style="position:relative;height:100px;"><canvas id="c-loss"></canvas></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 연결 상태 바 -->
+  <div class="ctrl">
+    <div class="pill-dot conn" id="conn-dot" style="width:8px;height:8px;"></div>
+    <span class="conn-label" id="conn-label">Connecting to dashboard server…</span>
+    <div class="sep"></div>
+    <button class="btn" id="btn-reconnect">↺ Reconnect</button>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+// Chart 초기화
+// ═══════════════════════════════════════════════════
+const isDark    = window.matchMedia('(prefers-color-scheme: dark)').matches;
+const gridColor = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)';
+const tickColor = isDark ? '#6b6b67' : '#9a9994';
+const MAX_PTS   = 70;
+
+function mkNodeChart(id, color) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {   // 재구성 오차
+          data: [], borderColor: color, backgroundColor: color + '18',
+          borderWidth: 1.5, pointRadius: 0, tension: 0.4, fill: true,
+        },
+        {   // threshold 점선
+          data: [], borderColor: '#e24b4a', borderDash: [4, 4],
+          borderWidth: 1.2, pointRadius: 0, fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: {
+          min: 0, suggestedMax: 1.0,
+          ticks: { font: { size: 9 }, color: tickColor, maxTicksLimit: 4 },
+          grid: { color: gridColor, drawBorder: false },
+        },
+      },
+    },
+  });
+}
+
+function mkLossChart() {
+  const ctx = document.getElementById('c-loss').getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        data: [], borderColor: '#1d9e75', backgroundColor: 'rgba(29,158,117,0.12)',
+        borderWidth: 1.5, tension: 0.4, fill: true,
+        pointRadius: 4,
+        pointBackgroundColor: isDark ? '#1c1c1a' : '#ffffff',
+        pointBorderColor: '#1d9e75', pointBorderWidth: 1.5,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { font: { size: 9 }, color: tickColor }, grid: { display: false } },
+        y: {
+          min: 0, suggestedMax: 1.5,
+          ticks: { font: { size: 9 }, color: tickColor, maxTicksLimit: 4 },
+          grid: { color: gridColor, drawBorder: false },
+        },
+      },
+    },
+  });
+}
+
+const C = {
+  mn1:  mkNodeChart('c-mn1', '#378add'),
+  mn2:  mkNodeChart('c-mn2', '#7f77dd'),
+  mn3:  mkNodeChart('c-mn3', '#378add'),
+  loss: mkLossChart(),
+};
+
+function pushScore(chart, score, thr) {
+  if (!Number.isFinite(score) || !Number.isFinite(thr)) return;
+  chart.data.labels.push('');
+  chart.data.datasets[0].data.push(parseFloat(score.toFixed(4)));
+  chart.data.datasets[1].data.push(parseFloat(thr.toFixed(4)));
+  if (chart.data.labels.length > MAX_PTS) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(d => d.data.shift());
+  }
+  chart.update('none');
+}
+
+function pushLoss(round, loss) {
+  if (!Number.isFinite(loss)) return;
+  C.loss.data.labels.push('R' + round);
+  C.loss.data.datasets[0].data.push(parseFloat(loss.toFixed(4)));
+  C.loss.update('none');
+}
+
+// ═══════════════════════════════════════════════════
+// Round dots
+// ═══════════════════════════════════════════════════
+let builtDots = 0;
+
+function buildDots(maxRounds) {
+  if (builtDots === maxRounds) return;
+  builtDots = maxRounds;
+  const el = document.getElementById('dots');
+  el.innerHTML = '';
+  for (let i = 1; i <= maxRounds; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot'; d.id = 'dot' + i; d.textContent = i;
+    el.appendChild(d);
+  }
+}
+
+function updateDots(round, maxRounds, faultRound) {
+  for (let i = 1; i <= maxRounds; i++) {
+    const d = document.getElementById('dot' + i);
+    if (!d) continue;
+    d.className = 'dot';
+    if (i < round)  d.classList.add(faultRound && i >= faultRound ? 'bad' : 'done');
+    if (i === round) d.classList.add(faultRound && i >= faultRound ? 'bad' : 'cur');
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// UI 헬퍼
+// ═══════════════════════════════════════════════════
+function toNumber(value, fallback = null) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function firstFinite(...values) {
+  for (const value of values) {
+    const n = toNumber(value, null);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function fmt(value, digits = 4, fallback = '—') {
+  const n = toNumber(value, null);
+  return n === null ? fallback : n.toFixed(digits);
+}
+
+function textOrDash(value) {
+  return value === null || value === undefined || value === '' ? '—' : value;
+}
+
+function setNode(id, state, badge) {
+  document.getElementById('nd-' + id).className = 'node ' + state;
+  const nb = document.getElementById('nb-' + id);
+  nb.className = 'node-badge ' + state;
+  nb.textContent = badge;
+}
+
+function setLV(id, text, danger) {
+  const el = document.getElementById('lv-' + id);
+  el.textContent = text;
+  el.className = 'live-val' + (danger ? ' danger' : '');
+}
+
+const STATE_LABEL = {
+  'FL_READY':       'Ready',
+  'FL_TRAINING':    'Training…',
+  'FL_AGGREGATING': 'Aggregating…',
+  'FL_COMPLETED':   'Complete',
+};
+
+const STATE_BADGE = {
+  'FL_READY':       ['ok',       'Ready'],
+  'FL_TRAINING':    ['training', 'Training'],
+  'FL_AGGREGATING': ['training', 'Aggregating'],
+  'FL_COMPLETED':   ['ok',       'Done'],
+};
+
+// ═══════════════════════════════════════════════════
+// 공유 상태
+// ═══════════════════════════════════════════════════
+let thresholds  = { mn1: null, mn2: null, mn3: null };
+let faulted     = false;
+let faultRound  = null;
+let mn3Consec   = 0;
+const K_FAULT   = 3;
+let lossHistory = {};
+let scoreIdx    = 0;   // 스트리밍 샘플 카운터
+let onsetIdx    = null; // mn3_label=1이 처음 나온 샘플 인덱스
+
+// ═══════════════════════════════════════════════════
+// 이벤트 핸들러
+// ═══════════════════════════════════════════════════
+function applyState(evt) {
+  // init / round 이벤트 공통 처리
+  const round     = toNumber(evt.round, 0);
+  const maxRounds = Math.max(1, Math.floor(toNumber(evt.max_rounds, config_maxRounds || 10)));
+  const state     = evt.fl_state  || 'FL_READY';
+  const nodes     = evt.nodes     || {};
+
+  config_maxRounds = maxRounds;
+
+  buildDots(maxRounds);
+  document.getElementById('rnum').textContent = round;
+  document.getElementById('rof').textContent  = '/ ' + maxRounds + ' rounds';
+  document.getElementById('rfill').style.width = (round / maxRounds * 100) + '%';
+  document.getElementById('phase-label').textContent = STATE_LABEL[state] || state;
+  document.getElementById('pill-sub').textContent    = 'Round ' + round + ' / ' + maxRounds;
+
+  updateDots(round, maxRounds, faultRound);
+
+  // 노드 배지
+  const [badgeClass, badgeText] = STATE_BADGE[state] || ['ok', 'Normal'];
+  if (!faulted) {
+    setNode('mn1', badgeClass, badgeText === 'Done' ? 'Normal' : badgeText);
+    setNode('mn2', badgeClass, badgeText === 'Done' ? 'Normal' : badgeText);
+    setNode('mn3', badgeClass === 'ok' ? 'ok' : badgeClass,
+            badgeClass === 'ok' ? 'Monitoring' : badgeText);
+  }
+
+  // pill 상태
+  if (state === 'FL_COMPLETED') {
+    document.getElementById('pill-dot').className  = faulted ? 'pill-dot alert' : 'pill-dot active';
+    document.getElementById('pill-label').textContent = faulted ? 'Fault detected' : 'Complete';
+  } else if (state === 'FL_TRAINING' || state === 'FL_AGGREGATING') {
+    document.getElementById('pill-dot').className   = 'pill-dot active';
+    document.getElementById('pill-label').textContent = STATE_LABEL[state];
+  }
+
+  // 노드별 메트릭 + 글로벌 loss 계산
+  const nodeList = Object.keys(nodes);
+  if (nodeList.length > 0) {
+    let totalSamples = 0, weightedLoss = 0;
+    nodeList.forEach(node => {
+      const d = nodes[node];
+      const samples = toNumber(d.num_samples, 0);
+      const trainLoss = toNumber(d.train_loss, 0);
+      totalSamples  += samples;
+      weightedLoss  += trainLoss * samples;
+
+      const au = document.getElementById('au-' + node);
+      const vl = document.getElementById('vl-' + node);
+      const ns = document.getElementById('ns-' + node);
+      if (au) au.textContent = fmt(d.val_auroc, 3);
+      if (vl) vl.textContent = fmt(d.val_loss, 4);
+      if (ns) ns.textContent = `R${d.round ?? '—'}  n=${d.num_samples ?? '—'}`;
+    });
+
+    if (totalSamples > 0 && round > 0 && !lossHistory[round]) {
+      const avgLoss = weightedLoss / totalSamples;
+      lossHistory[round] = avgLoss;
+      pushLoss(round, avgLoss);
+      setLV('loss', avgLoss.toFixed(4), false);
+    }
+  }
+
+  // threshold 업데이트가 이벤트에 포함돼 있으면 반영
+  if (evt.thresholds) applyThresholds(evt.thresholds);
+}
+
+function applyThresholds(thr) {
+  ['mn1', 'mn2', 'mn3'].forEach(node => {
+    const value = toNumber(thr[node], null);
+    if (value !== null) {
+      thresholds[node] = value;
+      const el = document.getElementById('thr-' + node);
+      if (el) el.textContent = 'threshold ' + value.toFixed(4);
+    }
+  });
+}
+
+function handleScore(evt) {
+  scoreIdx++;
+
+  ['mn1', 'mn2', 'mn3'].forEach(node => {
+    if (evt[node] === undefined) return;
+    const score = toNumber(evt[node], null);
+    const thr   = firstFinite(evt[node + '_thr'], thresholds[node], 1.0);
+    if (score === null) return;
+    pushScore(C[node], score, thr);
+    setLV(node, score.toFixed(4), score > thr);
+  });
+
+  // mn3 onset 추적
+  if (onsetIdx === null && evt['mn3_label'] === 1) {
+    onsetIdx = scoreIdx;
+  }
+
+  // mn3 fault 감지 (K회 연속 threshold 초과)
+  if (!faulted && evt.mn3 !== undefined) {
+    const score = toNumber(evt.mn3, null);
+    const thr = firstFinite(evt.mn3_thr, thresholds.mn3, 1.0);
+    if (score !== null && score > thr) {
+      mn3Consec++;
+      if (mn3Consec >= K_FAULT) triggerFault(scoreIdx);
+    } else {
+      mn3Consec = 0;
+    }
+  }
+}
+
+function playAlertBeep() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const beep = (freq, start, dur) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.25, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur);
+    };
+    beep(880, 0.00, 0.18);
+    beep(660, 0.22, 0.18);
+    beep(880, 0.44, 0.30);
+  } catch (_) {}
+}
+
+function triggerFault(detectSampleIdx) {
+  faulted    = true;
+  faultRound = parseInt(document.getElementById('rnum').textContent) || null;
+
+  // 탐지 지연 계산
+  const delay    = (onsetIdx !== null && detectSampleIdx !== null)
+                   ? detectSampleIdx - onsetIdx : null;
+  const aurocEl  = document.getElementById('au-mn3');
+  const auroc    = aurocEl ? aurocEl.textContent : '—';
+  const thrVal   = fmt(thresholds.mn3, 4);
+
+  // 카드 내 상세
+  const detail = [
+    onsetIdx    !== null ? `Onset: sample #${onsetIdx}` : null,
+    detectSampleIdx !== null ? `Detection: sample #${detectSampleIdx}` : null,
+    delay       !== null ? `Delay: ${delay} sample${delay !== 1 ? 's' : ''}` : null,
+    `Threshold: ${thrVal}`,
+    auroc !== '—' ? `AUROC: ${auroc}` : null,
+  ].filter(Boolean).join('  ·  ');
+
+  document.getElementById('alert-detail').textContent = detail;
+  document.getElementById('alert-strip').classList.add('show');
+
+  // 상단 배너
+  document.getElementById('banner-detail').textContent =
+    delay !== null
+      ? `Detection delay: ${delay} samples after fault onset  ·  Threshold: ${thrVal}  ·  AUROC: ${auroc}`
+      : `Threshold: ${thrVal}  ·  AUROC: ${auroc}`;
+  document.getElementById('fault-banner').classList.add('show');
+
+  // 노드 + 차트 카드
+  setNode('mn3', 'fault', 'Fault!');
+  document.getElementById('cc-mn3').className      = 'chart-card hl-red';
+  document.getElementById('rfill').style.background = '#e24b4a';
+  document.getElementById('pill-dot').className     = 'pill-dot alert';
+  document.getElementById('pill-label').textContent  = 'Fault detected';
+
+  if (faultRound) updateDots(faultRound, builtDots, faultRound);
+
+  playAlertBeep();
+}
+
+document.getElementById('banner-close').addEventListener('click', () => {
+  document.getElementById('fault-banner').classList.remove('show');
+});
+
+document.getElementById('summary-close').addEventListener('click', () => {
+  document.getElementById('summary-overlay').classList.remove('show');
+});
+
+function handleSummary(evt) {
+  document.getElementById('summary-sub').textContent =
+    `Final Evaluation — Global Model Round ${textOrDash(evt.model_round)}`;
+
+  const grid = document.getElementById('summary-grid');
+  grid.innerHTML = '';
+
+  const nodes = evt.nodes || {};
+  const FAULT_NODE = 'mn3';
+
+  ['mn1', 'mn2', 'mn3'].forEach(node => {
+    const d = nodes[node];
+    if (!d) return;
+
+    const auroc = toNumber(d.auroc, null);
+    const threshold = toNumber(d.threshold, null);
+    const isFaultNode = node === FAULT_NODE;
+
+    const card = document.createElement('div');
+    card.className = 'summary-node-card';
+
+    const roleTag = isFaultNode
+      ? `<span style="font-size:10px;color:var(--warn);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Fault Transition</span>`
+      : `<span style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Normal Support</span>`;
+
+    let rows = `
+      <div class="summary-node-name">${node} ${roleTag}</div>
+      <div class="summary-row">
+        <span class="summary-key">AUROC</span>
+        <span class="summary-val ${auroc !== null && auroc >= 0.95 ? 'good' : ''}">${fmt(auroc, 4)}</span>
+      </div>
+      <div class="summary-row">
+        <span class="summary-key">Threshold</span>
+        <span class="summary-val">${fmt(threshold, 4)}</span>
+      </div>
+      <div class="summary-row">
+        <span class="summary-key">Normal / Anomaly</span>
+        <span class="summary-val">${textOrDash(d.n_normal)} / ${textOrDash(d.n_anomaly)}</span>
+      </div>`;
+
+    if (isFaultNode) {
+      const detected = d.detect_idx !== null && d.detect_idx !== undefined;
+      const delayTxt = (d.delay !== null && d.delay !== undefined) ? `${d.delay} samples` : '—';
+      const falseAlarms = toNumber(d.false_alarms, null);
+      rows += `
+      <div class="summary-row">
+        <span class="summary-key">Fault onset</span>
+        <span class="summary-val">${d.onset_idx !== null && d.onset_idx !== undefined ? '#' + d.onset_idx : '—'}</span>
+      </div>
+      <div class="summary-row">
+        <span class="summary-key">Detected at</span>
+        <span class="summary-val ${detected ? 'good' : 'warn'}">${detected ? '#' + d.detect_idx : 'Not detected'}</span>
+      </div>
+      <div class="summary-row">
+        <span class="summary-key">Detection delay</span>
+        <span class="summary-val">${delayTxt}</span>
+      </div>
+      <div class="summary-row">
+        <span class="summary-key">False alarms</span>
+        <span class="summary-val ${falseAlarms === 0 ? 'good' : 'warn'}">${textOrDash(d.false_alarms)}</span>
+      </div>`;
+    } else {
+      rows += `
+      <div class="summary-row" style="margin-top:8px;">
+        <span class="summary-key" style="color:var(--text3);font-style:italic;font-size:11px;">Contributes to global model stability — fault detection not targeted</span>
+      </div>`;
+    }
+
+    card.innerHTML = rows;
+    grid.appendChild(card);
+  });
+
+  document.getElementById('summary-overlay').classList.add('show');
+}
+
+// ═══════════════════════════════════════════════════
+// SSE 연결
+// ═══════════════════════════════════════════════════
+let es = null;
+let reconnectTimer = null;
+let config_maxRounds = 10;
+
+function connect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (es) es.close();
+
+  document.getElementById('conn-dot').style.background   = 'var(--text3)';
+  document.getElementById('conn-label').textContent = 'Connecting…';
+
+  es = new EventSource('/stream');
+
+  es.onopen = function () {
+    document.getElementById('conn-dot').style.background   = 'var(--ok-bar)';
+    document.getElementById('conn-label').textContent = 'Connected · live';
+  };
+
+  es.onmessage = function (e) {
+    let evt;
+    try { evt = JSON.parse(e.data); } catch { return; }
+
+    if (evt.type === 'init' || evt.type === 'round') {
+      applyState(evt);
+    } else if (evt.type === 'threshold') {
+      applyThresholds(evt.thresholds || {});
+      // 새 모델 로드 시 스트리밍 카운터·탐지 상태 리셋
+      scoreIdx  = 0;
+      onsetIdx  = null;
+      mn3Consec = 0;
+    } else if (evt.type === 'score') {
+      handleScore(evt);
+    } else if (evt.type === 'summary') {
+      handleSummary(evt);
+    }
+  };
+
+  es.onerror = function () {
+    document.getElementById('conn-dot').style.background   = 'var(--fd-bar)';
+    document.getElementById('conn-label').textContent = 'Connection lost · retrying in 5s…';
+    if (es) es.close();
+    if (!reconnectTimer) {
+      reconnectTimer = setTimeout(connect, 5000);
+    }
+  };
+}
+
+document.getElementById('btn-reconnect').addEventListener('click', () => {
+  faulted    = false;
+  faultRound = null;
+  mn3Consec  = 0;
+  lossHistory = {};
+  scoreIdx   = 0;
+  onsetIdx   = null;
+  document.getElementById('fault-banner').classList.remove('show');
+  document.getElementById('summary-overlay').classList.remove('show');
+
+  // 차트 초기화
+  ['mn1', 'mn2', 'mn3', 'loss'].forEach(k => {
+    C[k].data.labels = [];
+    C[k].data.datasets.forEach(d => d.data = []);
+    C[k].update('none');
+  });
+
+  // UI 초기화
+  document.getElementById('rnum').textContent = '0';
+  document.getElementById('rfill').style.width      = '0%';
+  document.getElementById('rfill').style.background = 'var(--tr-bar)';
+  document.getElementById('alert-strip').classList.remove('show');
+  document.getElementById('cc-mn3').className = 'chart-card hl';
+  ['lv-mn1','lv-mn2','lv-mn3','lv-loss'].forEach(id => {
+    const el = document.getElementById(id);
+    el.textContent = '—'; el.className = 'live-val';
+  });
+  setNode('mn1', 'ok', 'Normal');
+  setNode('mn2', 'ok', 'Normal');
+  setNode('mn3', 'ok', 'Monitoring');
+
+  connect();
+});
+
+// 시작
+connect();
+</script>
+</body>
+</html>

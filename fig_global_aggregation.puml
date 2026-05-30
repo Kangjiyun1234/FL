@@ -1,0 +1,147 @@
+@startuml fig_global_aggregation
+
+skinparam roundCorner 0
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 11
+
+skinparam sequence {
+    ParticipantBackgroundColor #C8DCF0
+    ParticipantFontColor black
+    ParticipantBorderColor #7BA7C7
+    ParticipantFontSize 11
+    ArrowColor #333333
+    ArrowFontSize 10
+    ArrowFontColor #333333
+    LifeLineBorderColor #AAAAAA
+    ActivationBorderColor #7BA7C7
+    ActivationBackgroundColor #C8DCF0
+    NoteBackgroundColor #D6EAF8
+    NoteBorderColor #7BA7C7
+    NoteFontSize 10
+    BoxBackgroundColor #EEF5FB
+    BoxBorderColor #7BA7C7
+    BoxFontColor #333333
+    BoxFontSize 11
+}
+
+box "Factory A" #EBF5FB
+    participant "MN-AE1"  as MNAE1
+    participant "MN-CSE1" as MNCSE1
+end box
+
+box "Factory B" #EBF5FB
+    participant "MN-AE2"  as MNAE2
+    participant "MN-CSE2" as MNCSE2
+end box
+
+box "Factory C" #EBF5FB
+    participant "MN-AE3"  as MNAE3
+    participant "MN-CSE3" as MNCSE3
+end box
+
+box "Cloud Service Platform" #FEF9E7
+    participant "IN-CSE" as INCSE
+    participant "IN-AE"  as INAE
+end box
+
+' Step 1
+INCSE -> INAE : 1
+note right
+  Notify IN-AE: new contentInstance
+  created under cnt-local-updates
+  (subscription triggered)
+end note
+
+' Step 2
+INAE -> INCSE : 2-1
+note right
+  Retrieve contentInstance
+  from cnt-local-updates/cnt-mn1
+end note
+
+INAE -> INCSE : 2-2
+note right
+  Retrieve contentInstance
+  from cnt-local-updates/cnt-mn2
+end note
+
+INAE -> INCSE : 2-3
+note right
+  Retrieve contentInstance
+  from cnt-local-updates/cnt-mn3
+end note
+
+' Step 3
+INAE -> INAE : 3
+note right
+  Validate each update:
+  - round field matches current round
+  - node field is a registered
+    participating node
+end note
+
+' Step 4
+INAE -> INCSE : 4
+note right
+  Create contentInstance
+  under cnt-fl-control:
+  jobState = FL_AGGREGATING
+end note
+
+' Step 5
+INAE -> INAE : 5
+note right
+  Z-score-based anomaly detection:
+  identify and exclude
+  potentially poisoned updates
+end note
+
+' Step 6
+INAE -> INAE : 6
+note right
+  Apply FedAvg algorithm
+  to valid updates to produce
+  updated global model
+end note
+
+' Step 7
+INAE -> INCSE : 7
+note right
+  Create contentInstance
+  under cnt-global-model:
+  - global_round, model_path,
+    model_ready, timestamp
+end note
+
+' Step 8
+INAE -> INCSE : 8
+note right
+  Create contentInstance
+  under cnt-fl-control:
+  jobState = FL_ROUND_COMPLETE
+  or FL_DONE (if max rounds reached)
+end note
+
+' Step 9
+INCSE -> MNAE1 : 9-1
+note right
+  Notify MN-AE1: new contentInstance
+  created under cnt-fl-control
+  (next round or FL_DONE)
+end note
+
+INCSE -> MNAE2 : 9-2
+note right
+  Notify MN-AE2: new contentInstance
+  created under cnt-fl-control
+  (next round or FL_DONE)
+end note
+
+INCSE -> MNAE3 : 9-3
+note right
+  Notify MN-AE3: new contentInstance
+  created under cnt-fl-control
+  (next round or FL_DONE)
+end note
+
+@enduml

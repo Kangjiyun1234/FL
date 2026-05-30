@@ -1,0 +1,188 @@
+@startuml fig_initial_setup
+
+skinparam roundCorner 0
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 11
+
+skinparam sequence {
+    ParticipantBackgroundColor #C8DCF0
+    ParticipantFontColor black
+    ParticipantBorderColor #7BA7C7
+    ParticipantFontSize 11
+    ArrowColor #333333
+    ArrowFontSize 10
+    ArrowFontColor #333333
+    LifeLineBorderColor #AAAAAA
+    ActivationBorderColor #7BA7C7
+    ActivationBackgroundColor #C8DCF0
+    NoteBackgroundColor #D6EAF8
+    NoteBorderColor #7BA7C7
+    NoteFontSize 10
+    BoxBackgroundColor #EEF5FB
+    BoxBorderColor #7BA7C7
+    BoxFontColor #333333
+    BoxFontSize 11
+}
+
+box "Factory A" #EBF5FB
+    participant "ADN-AE1" as ADN1
+    participant "MN-AE1"  as MNAE1
+    participant "MN-CSE1" as MNCSE1
+end box
+
+box "Factory B" #EBF5FB
+    participant "ADN-AE2" as ADN2
+    participant "MN-AE2"  as MNAE2
+    participant "MN-CSE2" as MNCSE2
+end box
+
+box "Factory C" #EBF5FB
+    participant "ADN-AE3" as ADN3
+    participant "MN-AE3"  as MNAE3
+    participant "MN-CSE3" as MNCSE3
+end box
+
+box "Cloud Service Platform" #FEF9E7
+    participant "IN-CSE" as INCSE
+    participant "IN-AE"  as INAE
+end box
+
+' Step 1
+INAE -> INCSE : 1
+note right
+  Register IN-AE (Mca)
+end note
+
+' Step 2
+MNCSE1 -> INCSE : 2-1
+note right
+  Register MN-CSE1
+  to IN-CSE (Mcc)
+end note
+
+MNCSE2 -> INCSE : 2-2
+note right
+  Register MN-CSE2
+  to IN-CSE (Mcc)
+end note
+
+MNCSE3 -> INCSE : 2-3
+note right
+  Register MN-CSE3
+  to IN-CSE (Mcc)
+end note
+
+' Step 3
+MNAE1 -> MNCSE1 : 3-1
+note right
+  Register MN-AE1 (Mca)
+end note
+
+MNAE2 -> MNCSE2 : 3-2
+note right
+  Register MN-AE2 (Mca)
+end note
+
+MNAE3 -> MNCSE3 : 3-3
+note right
+  Register MN-AE3 (Mca)
+end note
+
+' Step 4
+ADN1 -> MNCSE1 : 4-1
+note right
+  Register ADN-AE1
+  to MN-CSE1 (Mca)
+end note
+
+ADN2 -> MNCSE2 : 4-2
+note right
+  Register ADN-AE2
+  to MN-CSE2 (Mca)
+end note
+
+ADN3 -> MNCSE3 : 4-3
+note right
+  Register ADN-AE3
+  to MN-CSE3 (Mca)
+end note
+
+' Step 5
+INAE -> INCSE : 5
+note right
+  Create FL management containers:
+  - cnt-fl-control
+  - cnt-global-model
+  - cnt-local-updates
+    - cnt-mn1
+    - cnt-mn2
+    - cnt-mn3
+end note
+
+' Step 6
+MNAE1 -> MNCSE1 : 6-1
+note right
+  Create local containers on MN-CSE1:
+  - cnt-sensor-data
+  - cnt-local-model
+end note
+
+MNAE2 -> MNCSE2 : 6-2
+note right
+  Create local containers on MN-CSE2:
+  - cnt-sensor-data
+  - cnt-local-model
+end note
+
+MNAE3 -> MNCSE3 : 6-3
+note right
+  Create local containers on MN-CSE3:
+  - cnt-sensor-data
+  - cnt-local-model
+end note
+
+' Step 7
+ADN1 -> MNCSE1 : 7-1
+note right
+  Upload sensor metadata
+  to cnt-sensor-data
+end note
+
+ADN2 -> MNCSE2 : 7-2
+note right
+  Upload sensor metadata
+  to cnt-sensor-data
+end note
+
+ADN3 -> MNCSE3 : 7-3
+note right
+  Upload sensor metadata
+  to cnt-sensor-data
+end note
+
+' Step 8
+MNAE1 -> INCSE : 8-1
+note right
+  Subscribe to cnt-fl-control
+end note
+
+MNAE2 -> INCSE : 8-2
+note right
+  Subscribe to cnt-fl-control
+end note
+
+MNAE3 -> INCSE : 8-3
+note right
+  Subscribe to cnt-fl-control
+end note
+
+' Step 9
+INAE -> INCSE : 9
+note right
+  Subscribe to local update containers:
+  - cnt-local-updates/cnt-mn1
+  - cnt-local-updates/cnt-mn2
+  - cnt-local-updates/cnt-mn3
+end note
+
+@enduml

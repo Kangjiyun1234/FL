@@ -1,0 +1,105 @@
+@startuml fig_global_distribution
+
+skinparam roundCorner 0
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 11
+
+skinparam sequence {
+    ParticipantBackgroundColor #C8DCF0
+    ParticipantFontColor black
+    ParticipantBorderColor #7BA7C7
+    ParticipantFontSize 11
+    ArrowColor #333333
+    ArrowFontSize 10
+    ArrowFontColor #333333
+    LifeLineBorderColor #AAAAAA
+    ActivationBorderColor #7BA7C7
+    ActivationBackgroundColor #C8DCF0
+    NoteBackgroundColor #D6EAF8
+    NoteBorderColor #7BA7C7
+    NoteFontSize 10
+    BoxBackgroundColor #EEF5FB
+    BoxBorderColor #7BA7C7
+    BoxFontColor #333333
+    BoxFontSize 11
+}
+
+box "Factory A" #EBF5FB
+    participant "MN-AE1"  as MNAE1
+    participant "MN-CSE1" as MNCSE1
+end box
+
+box "Factory B" #EBF5FB
+    participant "MN-AE2"  as MNAE2
+    participant "MN-CSE2" as MNCSE2
+end box
+
+box "Factory C" #EBF5FB
+    participant "MN-AE3"  as MNAE3
+    participant "MN-CSE3" as MNCSE3
+end box
+
+box "Cloud Service Platform" #FEF9E7
+    participant "IN-CSE" as INCSE
+    participant "IN-AE"  as INAE
+end box
+
+' Step 1
+INAE -> INCSE : 1
+note right
+  Create contentInstance under cnt-global-model:
+  - global_round, model_path,
+    model_ready, timestamp
+end note
+
+' Step 2
+INAE -> INCSE : 2
+note right
+  Create contentInstance under cnt-fl-control:
+  - type, jobState, currentRound,
+    globalModelUri, securityMode,
+    privacyParams, maxRounds, timestamp
+end note
+
+' Step 3
+INCSE -> MNAE1 : 3-1
+note right
+  Notify MN-AE1: new contentInstance
+  created under cnt-fl-control
+  (subscription triggered)
+end note
+
+INCSE -> MNAE2 : 3-2
+note right
+  Notify MN-AE2: new contentInstance
+  created under cnt-fl-control
+  (subscription triggered)
+end note
+
+INCSE -> MNAE3 : 3-3
+note right
+  Notify MN-AE3: new contentInstance
+  created under cnt-fl-control
+  (subscription triggered)
+end note
+
+' Step 4
+MNAE1 -> INCSE : 4-1
+note right
+  Retrieve global model metadata
+  via globalModelUri
+end note
+
+MNAE2 -> INCSE : 4-2
+note right
+  Retrieve global model metadata
+  via globalModelUri
+end note
+
+MNAE3 -> INCSE : 4-3
+note right
+  Retrieve global model metadata
+  via globalModelUri
+end note
+
+@enduml

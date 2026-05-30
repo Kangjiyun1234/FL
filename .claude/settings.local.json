@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for d:*)",
+      "Bash(do echo:*)",
+      "Read(//home/eunjin/federated-learning/**)",
+      "Bash(done)",
+      "Bash(python3 -c \":*)"
+    ]
+  }
+}

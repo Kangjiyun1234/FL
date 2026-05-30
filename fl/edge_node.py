@@ -1,132 +1,88 @@
-from __future__ import annotations
-from typing import List, Tuple, Optional
-from dataclasses import dataclass
+"""
+fl/edge_node.py — FEMTO PRONOSTIA Bearing 데이터셋용 Edge 노드
 
-import pandas as pd
+AEEdgeNode: Conv1DAE 기반 정상 신호 재구성 학습 (anomaly detection)
+  - 입력: raw 시계열 신호 (N, seq_len) numpy array
+  - 손실: MSE reconstruction loss (정상 샘플만)
+  - FedAvg 집계: get/set_state_dict()
+
+레거시:
+  EdgeNode: 통계 피처 기반 MLP 분류기 (이전 버전, 미사용)
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import List, Optional
+
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from fl.config import TrainConfig
-from fl.model import PumpMaintenanceClassifier, TurbofanLSTM
+from config import TrainConfig, AEConfig
+from model import Conv1DAE
 
 StateDict = dict[str, torch.Tensor]
 
 
-@dataclass
-class NodeDataset:
-    X_train: torch.Tensor
-    y_train: torch.Tensor
-    X_val: torch.Tensor
-    y_val: torch.Tensor
+# ════════════════════════════════════════════════════════
+# AE Edge Node
+# ════════════════════════════════════════════════════════
 
+class AEEdgeNode:
+    """
+    Conv1DAE 기반 Edge 노드
 
-class EdgeNode:
+    학습: 정상 신호만 사용, MSE 재구성 손실 최소화
+    평가: val 세트에서 anomaly score(재구성 오차) 기반 AUROC / threshold 결정
+    """
+
     def __init__(
         self,
-        node_id: int,
-        data: pd.DataFrame,
-        sensor_cols: List[str],
-        train_cfg: TrainConfig,
-        device: str = "cpu",
-        *,
-        eval_only: bool = False,          # ✅ 추가: 평가 전용 노드
-        train_split: Optional[float] = None,  # ✅ 필요 시 split override
-        debug_first_batch: bool = False,  # ✅ 필요 시 디버그
+        node_id:    int,
+        train_signals: np.ndarray,   # (N_train, seq_len) — 정상만
+        val_signals:   np.ndarray,   # (N_val,   seq_len)
+        val_labels:    np.ndarray,   # (N_val,)  0=정상, 1=이상
+        ae_cfg:     AEConfig,
+        train_cfg:  TrainConfig,
+        device:     str = "cpu",
     ):
-        self.node_id = node_id
-        self.device = device
+        self.node_id   = node_id
+        self.device    = device
+        self.ae_cfg    = ae_cfg
         self.train_cfg = train_cfg
-        self.data = data
-        self.sensor_cols = sensor_cols
-        self.eval_only = eval_only
-        self.debug_first_batch = debug_first_batch
 
-        # split override (기본값: cfg 값)
-        self._train_split = float(train_split) if train_split is not None else float(train_cfg.train_split)
+        # ── 텐서 변환 ──
+        X_train = torch.tensor(train_signals, dtype=torch.float32)
+        X_val   = torch.tensor(val_signals,   dtype=torch.float32)
+        y_val   = torch.tensor(val_labels,    dtype=torch.long)
 
-        self.dataset = self._prepare_dataset()
-        self.num_train_samples = int(self.dataset.X_train.shape[0])
+        # shape: (N, seq_len) → DataLoader에서 unsqueeze
+        self.train_ds = TensorDataset(X_train)
+        self.val_ds   = TensorDataset(X_val, y_val)
 
-        input_size = len(sensor_cols)
+        self.num_train_samples = len(X_train)
 
-        if "unit_id" in self.data.columns:
-            self.model = TurbofanLSTM(
-                input_size=input_size,
-                hidden_size=train_cfg.hidden_size,
-                num_classes=1,
-                num_layers=2,
-                dropout=0.3,
-            ).to(device)
-        else:
-            self.model = PumpMaintenanceClassifier(
-                input_size=input_size,
-                hidden_size=train_cfg.hidden_size,
-                num_classes=1,
-                dropout=0.3,
-            ).to(device)
+        # ── 모델 ──
+        self.model = Conv1DAE(
+            n_channels = ae_cfg.n_channels,
+            latent_dim = ae_cfg.latent_dim,
+            seq_len    = ae_cfg.seq_len,
+        ).to(device)
 
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
-            lr=train_cfg.lr,
-            weight_decay=train_cfg.weight_decay,
+            lr           = train_cfg.lr,
+            weight_decay = train_cfg.weight_decay,
         )
 
-        # pos_weight는 Trainer에서도 동일하게 쓰는 값이므로 일관 유지
-        pos_weight = torch.tensor([6.0]).to(device)
-        self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.criterion = nn.MSELoss()
 
-    def _prepare_dataset(self) -> NodeDataset:
-        seq_len = self.train_cfg.sequence_length
+        print(f"    [AEEdgeNode] node={node_id}  train={self.num_train_samples}"
+              f"  val={len(X_val)}  latent={ae_cfg.latent_dim}  seq={ae_cfg.seq_len}")
 
-        # NASA Turbofan
-        if "unit_id" in self.data.columns:
-            from fl.data_nasa import create_sequences_nasa
-            X, y = create_sequences_nasa(self.data, self.sensor_cols, seq_len)
-        else:
-            # Pump
-            from fl.data import create_sequences
-            X, y = create_sequences(self.data, self.sensor_cols, seq_len)
-
-        if len(X) == 0:
-            raise ValueError(
-                f"Node {self.node_id}: Not enough data to create sequences "
-                f"(len={len(self.data)}, seq_len={seq_len})"
-            )
-
-        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
-        y_t = torch.tensor(y, dtype=torch.float32, device=self.device)
-
-        # ✅ eval_only이면 전체를 evaluation set으로 사용 (split 없음)
-        if self.eval_only:
-            X_train = X_t[:0]  # empty
-            y_train = y_t[:0]
-            X_val = X_t
-            y_val = y_t
-            return NodeDataset(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val)
-
-        split = int(len(X_t) * self._train_split)
-        X_train, y_train = X_t[:split], y_t[:split]
-        X_val, y_val = X_t[split:], y_t[split:]
-
-        return NodeDataset(
-            X_train=X_train,
-            y_train=y_train,
-            X_val=X_val,
-            y_val=y_val,
-        )
-
-    def _get_loaders(self):
-        if self.eval_only:
-            raise RuntimeError("This node is eval_only=True; no training loaders available.")
-
-        train_ds = TensorDataset(self.dataset.X_train, self.dataset.y_train)
-        val_ds = TensorDataset(self.dataset.X_val, self.dataset.y_val)
-
-        return (
-            DataLoader(train_ds, batch_size=self.train_cfg.batch_size, shuffle=True),
-            DataLoader(val_ds, batch_size=self.train_cfg.batch_size),
-        )
+    # ── 가중치 공유 ──
 
     def get_state_dict(self) -> StateDict:
         return {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
@@ -135,60 +91,158 @@ class EdgeNode:
         self.model.load_state_dict(state)
         self.model.to(self.device)
 
-    def train_local(self):
-        if self.eval_only:
-            raise RuntimeError("train_local() called on eval_only=True node")
+    # ── 로컬 학습 ──
 
-        train_loader, val_loader = self._get_loaders()
+    def train_local(
+        self,
+        dp_epsilon:       Optional[float] = None,
+        dp_delta:         float = 1e-5,
+        dp_max_grad_norm: float = 1.5,
+    ) -> tuple[float, float, float]:
+        """
+        로컬 AE 학습 (정상 데이터만)
 
-        # ===== TRAIN =====
+        반환: (train_loss, val_loss, val_auroc)
+          val_auroc: 재구성 오차 기반 AUROC (0.5=랜덤, 1.0=완벽)
+        """
+        use_dp = dp_epsilon is not None
+        if use_dp:
+            sigma = math.sqrt(2 * math.log(1.25 / dp_delta)) / dp_epsilon
+
+        train_loader = DataLoader(
+            self.train_ds,
+            batch_size = self.train_cfg.batch_size,
+            shuffle    = True,
+            drop_last  = False,
+        )
+
+        # ── Train ──
         self.model.train()
-        train_loss_sum, train_total = 0.0, 0
+        train_loss_sum = 0.0
+        train_total    = 0
 
-        for epoch in range(self.train_cfg.local_epochs):
-            for batch_idx, (xb, yb) in enumerate(train_loader):
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
+        for _ in range(self.train_cfg.local_epochs):
+            for (xb,) in train_loader:
+                xb = xb.to(self.device)          # (B, L)
+                xb_in = xb.unsqueeze(1)          # (B, 1, L)
 
                 self.optimizer.zero_grad()
-                logits = self.model(xb).squeeze(1)
-                loss = self.criterion(logits, yb)
+                recon = self.model(xb_in)        # (B, 1, L)
+                loss  = self.criterion(recon, xb_in)
 
-                # 누적 (샘플 수 기준 가중 평균)
-                bs = int(yb.size(0))
+                bs = int(xb.size(0))
                 train_loss_sum += float(loss.item()) * bs
-                train_total += bs
-
-                # (선택) 디버그: Node 1 첫 배치 1회만
-                if self.debug_first_batch and self.node_id == 1 and epoch == 0 and batch_idx == 0:
-                    with torch.no_grad():
-                        lg = logits.detach().view(-1)
-                        yy = yb.detach().view(-1)
-                        print("\n[DEBUG][Node 1] first batch check")
-                        print(f"  xb.shape={tuple(xb.shape)} yb.shape={tuple(yb.shape)} logits.shape={tuple(logits.shape)}")
-                        print(f"  yb.mean(pos_ratio)={yy.mean().item():.6f} yb.sum={yy.sum().item():.0f}/{yy.numel()}")
-                        print(f"  logits: min={lg.min().item():.6f} max={lg.max().item():.6f} mean={lg.mean().item():.6f}")
-                        print(f"  loss={loss.item():.12f} isfinite={torch.isfinite(loss).item()}")
+                train_total    += bs
 
                 loss.backward()
+
+                if use_dp:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_norm=dp_max_grad_norm
+                    )
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            noise = (torch.randn_like(param.grad)
+                                     * sigma * dp_max_grad_norm / bs)
+                            param.grad += noise
+
                 self.optimizer.step()
 
         train_loss = train_loss_sum / max(train_total, 1)
 
-        # ===== VALIDATION =====
+        # ── Validation ──
+        val_loss, val_auroc = self._evaluate_val()
+
+        return float(train_loss), float(val_loss), float(val_auroc)
+
+    def _evaluate_val(self) -> tuple[float, float]:
+        """val 세트 평가: (val_mse_normal, auroc)"""
+        val_loader = DataLoader(
+            self.val_ds,
+            batch_size = self.train_cfg.batch_size,
+            shuffle    = False,
+        )
+
         self.model.eval()
-        val_loss_sum, val_total = 0.0, 0
+        all_errors = []
+        all_labels = []
+        val_mse_sum   = 0.0
+        val_normal_n  = 0
 
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb = xb.to(self.device)
-                yb = yb.to(self.device)
-                logits = self.model(xb).squeeze(1)
-                loss = self.criterion(logits, yb)
+                xb, yb = xb.to(self.device), yb.to(self.device)
+                xb_in  = xb.unsqueeze(1)           # (B, 1, L)
+                recon  = self.model(xb_in)
+                errors = ((xb_in - recon) ** 2).mean(dim=(1, 2))  # (B,)
 
-                bs = int(yb.size(0))
-                val_loss_sum += float(loss.item()) * bs
-                val_total += bs
+                all_errors.append(errors.cpu())
+                all_labels.append(yb.cpu())
 
-        val_loss = val_loss_sum / max(val_total, 1)
-        return float(train_loss), float(val_loss), 0.0
+                # val_loss = 정상 샘플의 MSE
+                normal_mask = (yb == 0)
+                if normal_mask.any():
+                    val_mse_sum  += errors[normal_mask].sum().item()
+                    val_normal_n += normal_mask.sum().item()
+
+        val_loss = val_mse_sum / max(val_normal_n, 1)
+
+        # AUROC 계산
+        errors = torch.cat(all_errors).numpy()
+        labels = torch.cat(all_labels).numpy()
+
+        auroc = _compute_auroc(errors, labels)
+
+        return val_loss, auroc
+
+    def compute_anomaly_scores(self, signals: np.ndarray) -> np.ndarray:
+        """
+        signals: (N, seq_len) → anomaly scores (N,) — 재구성 MSE
+        임계값 비교에 사용
+        """
+        X = torch.tensor(signals, dtype=torch.float32).to(self.device)
+        X = X.unsqueeze(1)   # (N, 1, L)
+
+        self.model.eval()
+        scores = []
+        with torch.no_grad():
+            for i in range(0, len(X), self.train_cfg.batch_size):
+                xb    = X[i: i + self.train_cfg.batch_size]
+                recon = self.model(xb)
+                err   = ((xb - recon) ** 2).mean(dim=(1, 2))
+                scores.append(err.cpu().numpy())
+
+        return np.concatenate(scores)
+
+
+# ════════════════════════════════════════════════════════
+# AUROC 헬퍼
+# ════════════════════════════════════════════════════════
+
+def _compute_auroc(scores: np.ndarray, labels: np.ndarray) -> float:
+    """
+    scores가 높을수록 anomaly에 가깝다고 가정
+    labels: 0=정상, 1=이상
+    """
+    if len(np.unique(labels)) < 2:
+        return 0.5   # 단일 클래스면 의미 없음
+
+    try:
+        from sklearn.metrics import roc_auc_score
+        return float(roc_auc_score(labels, scores))
+    except Exception:
+        return 0.5
+
+
+# ════════════════════════════════════════════════════════
+# 레거시 EdgeNode (통계 피처 기반 MLP, 미사용)
+# ════════════════════════════════════════════════════════
+
+class EdgeNode:
+    """레거시: 통계 피처 벡터 → 분류 (현재 미사용, 인터페이스 유지)"""
+
+    def __init__(self, node_id, data, sensor_cols, train_cfg, device="cpu", **kwargs):
+        raise NotImplementedError(
+            "EdgeNode (통계피처 MLP) 는 더 이상 사용하지 않습니다. "
+            "AEEdgeNode 를 사용하세요."
+        )

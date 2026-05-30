@@ -15,9 +15,22 @@ training:
   weight_decay: 0.0001
   device: "cpu"
   seed: 42
-
   train_split: 0.8
   sequence_length: 50
-
   hidden_size: 64
   num_classes: 2
+
+onem2m:
+  enabled: true
+  base_url: "http://127.0.0.1:3000/TinyIoT"
+  origin: "CAdmin"
+  rvi: "2a"
+  in_ae: "IN-AE"
+  global_model_cnt: "global_model"
+  training_status_cnt: "training_status"
+  local_results_cnt: "local_results"
+  local_updates_cnt: "local_updates"  # ✅ 추가
+  trainer_status_cnt: "trainer_status"  # ✅ 추가
+  min_required_nodes: 3
+  poll_sec: 2
+  max_chunk_size: 10000  # ✅ 10KB로 줄임 (50KB → 10KB)
