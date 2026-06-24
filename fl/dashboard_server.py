@@ -18,16 +18,15 @@ Usage:
 """
 from __future__ import annotations
 
-import sys
-sys.path.append('/home/jiyun1222/projects/federated-learning/fl')
-
 import os
+import sys
 import json
 import time
 import pickle
 import threading
 import queue
 import glob
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -39,15 +38,20 @@ import onem2m_utils as om2m
 from model import Conv1DAE
 
 # ─── 파라미터 ──────────────────────────────────────────────────────────────
-PORT             = 7000
-POLL_INTERVAL    = 3.0    # oneM2M 폴링 주기 (초)
-SCORE_INTERVAL   = 0.5    # 샘플 스트리밍 주기 (초)
+PORT             = int(os.getenv("FL_DASHBOARD_PORT", "7000"))
+POLL_INTERVAL    = float(os.getenv("FL_DASHBOARD_POLL_INTERVAL", "3.0"))    # oneM2M 폴링 주기 (초)
+SCORE_INTERVAL   = float(os.getenv("FL_DASHBOARD_SCORE_INTERVAL", "0.5"))   # 샘플 스트리밍 주기 (초)
+
 N_SIGMA          = 3.0    # threshold = val 정상 MSE mean + N*sigma
 K_CONSECUTIVE    = 3      # 연속 N회 threshold 초과 시 fault 판정
-GLOBAL_MODEL_DIR = "/tmp/fl_models/global"
-PKL_DIR          = "/tmp/fl_data/femto"
+
+PROJECT_ROOT     = Path(__file__).resolve().parents[1]
+HTML_PATH        = PROJECT_ROOT / "fl_bearing_dashboard.html"
+
+GLOBAL_MODEL_DIR = Path(os.getenv("FL_GLOBAL_MODEL_DIR", "/tmp/fl_models/global"))
+PKL_DIR          = Path(os.getenv("FL_PKL_DIR", "/tmp/fl_data/femto"))
+
 NODES            = ["mn1", "mn2", "mn3"]
-HTML_PATH        = "/home/jiyun1222/projects/federated-learning/fl_bearing_dashboard.html"
 
 app = Flask(__name__)
 
@@ -91,19 +95,58 @@ def _broadcast(evt: dict) -> None:
 
 @app.route("/")
 def index():
-    with open(HTML_PATH, encoding="utf-8") as f:
-        return f.read()
+    if not HTML_PATH.exists():
+        return (
+            f"Dashboard HTML not found: {HTML_PATH}<br>"
+            "프로젝트 루트에 fl_bearing_dashboard.html이 있는지 확인하세요.",
+            500,
+        )
+    return HTML_PATH.read_text(encoding="utf-8")
 
 
 @app.route("/health")
 def health():
+    global_files = []
+    try:
+        global_files = sorted(
+            [p.name for p in GLOBAL_MODEL_DIR.glob("global_round*.pt")]
+        )
+    except Exception:
+        global_files = []
+
+    pkl_status = {
+        node: (PKL_DIR / f"{node}.pkl").exists()
+        for node in NODES
+    }
+
     with _shared_lock:
-        return {
-            "ok":     True,
-            "state":  _shared["fl_state"],
-            "round":  _shared["round"],
-            "model":  _shared["model_round"],
+        state = {
+            "ok": True,
+            "oneM2M": config.BASE_URL,
+
+            "state": _shared["fl_state"],
+            "round": _shared["round"],
+            "max_rounds": _shared["max_rounds"],
+            "model_round": _shared["model_round"],
+
+            "html_path": str(HTML_PATH),
+            "html_exists": HTML_PATH.exists(),
+
+            "global_model_dir": str(GLOBAL_MODEL_DIR),
+            "global_model_dir_exists": GLOBAL_MODEL_DIR.exists(),
+            "global_model_files": global_files,
+
+            "pkl_dir": str(PKL_DIR),
+            "pkl_dir_exists": PKL_DIR.exists(),
+            "pkl_files": pkl_status,
+
+            "nodes": _shared["nodes"],
+            "thresholds": _shared["thresholds"],
+            "score_idx": _shared["score_idx"],
+            "summary_sent": _shared["summary_sent"],
         }
+
+    return state
 
 
 @app.route("/stream")
@@ -153,13 +196,15 @@ def stream():
 # 모델 / 스코어 계산
 # ══════════════════════════════════════════════════════════════════════════
 
-def _find_latest_model() -> tuple[int, str | None]:
+def _find_latest_model() -> tuple[int, Path | None]:
     """가장 최신 global_roundN.pt 파일의 (round, path) 반환"""
-    files = glob.glob(os.path.join(GLOBAL_MODEL_DIR, "global_round*.pt"))
-    best_r, best_f = 0, None
-    for f in files:
+    if not GLOBAL_MODEL_DIR.exists():
+        return -1, None
+
+    best_r, best_f = -1, None
+    for f in GLOBAL_MODEL_DIR.glob("global_round*.pt"):
         try:
-            r = int(os.path.basename(f).replace("global_round", "").replace(".pt", ""))
+            r = int(f.stem.replace("global_round", ""))
             if r > best_r:
                 best_r, best_f = r, f
         except ValueError:
@@ -167,7 +212,7 @@ def _find_latest_model() -> tuple[int, str | None]:
     return best_r, best_f
 
 
-def _load_model(path: str) -> Conv1DAE:
+def _load_model(path: str | Path) -> Conv1DAE:
     ae = config.AE_CFG
     m = Conv1DAE(n_channels=ae.n_channels, latent_dim=ae.latent_dim, seq_len=ae.seq_len)
     m.load_state_dict(torch.load(path, map_location="cpu"))
@@ -227,11 +272,11 @@ def _reload_scores_if_needed() -> None:
     new_labels: dict[str, np.ndarray] = {}
 
     for node in NODES:
-        pkl = os.path.join(PKL_DIR, f"{node}.pkl")
-        if not os.path.exists(pkl):
+        pkl = PKL_DIR / f"{node}.pkl"
+        if not pkl.exists():
             print(f"  ⚠ {pkl} 없음, 스킵")
             continue
-        with open(pkl, "rb") as f:
+        with pkl.open("rb") as f:
             ds = pickle.load(f)
 
         seq_len   = config.AE_CFG.seq_len
@@ -252,11 +297,12 @@ def _reload_scores_if_needed() -> None:
         print(f"    {node}: n={len(sc)}  threshold={thr:.4f}")
 
     with _shared_lock:
-        _shared["thresholds"]  = new_thr
-        _shared["scores"]      = new_scores
-        _shared["labels"]      = new_labels
-        _shared["score_idx"]   = 0
-        _shared["model_round"] = model_r
+        _shared["thresholds"]   = new_thr
+        _shared["scores"]       = new_scores
+        _shared["labels"]       = new_labels
+        _shared["score_idx"]    = 0
+        _shared["model_round"]  = model_r
+        _shared["summary_sent"] = False
 
     _broadcast({
         "type":        "threshold",
@@ -455,8 +501,10 @@ def _poll_thread() -> None:
             _mready     = _shared["model_round"] >= _shared["max_rounds"]
             _score_idx  = _shared["score_idx"]
             _scores     = _shared["scores"]
+
         _max_len = max((len(v) for v in _scores.values()), default=0)
         _stream_done = _score_idx >= _max_len > 0
+
         if _fl_done and _mready and _stream_done and not _sent:
             summary = _compute_summary()
             if summary:
@@ -473,7 +521,7 @@ def _poll_thread() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    os.makedirs(GLOBAL_MODEL_DIR, exist_ok=True)
+    GLOBAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     print("\n=== FL Dashboard Server ===")
     print(f"  oneM2M : {config.BASE_URL}")

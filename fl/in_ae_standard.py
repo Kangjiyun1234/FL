@@ -9,7 +9,7 @@
 """
 
 import sys
-sys.path.append('/home/eunjin/federated-learning/fl')
+from pathlib import Path
 
 import time
 import os
@@ -23,7 +23,9 @@ from flask import Flask, request, make_response
 import config
 import onem2m_utils as om2m
 from aggregator import Aggregator
+from model import Conv1DAE
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 class INAECoordinator:
     def __init__(self, max_rounds=config.GLOBAL_ROUNDS):
@@ -53,14 +55,22 @@ class INAECoordinator:
         # -----------------------
         # 추가: 글로벌 모델/평가 경로
         # -----------------------
-        self.global_model_dir = "/tmp/fl_models/global"
+        self.global_model_dir = os.getenv(
+            "FL_GLOBAL_MODEL_DIR",
+            "/tmp/fl_models/global"
+        )
         os.makedirs(self.global_model_dir, exist_ok=True)
 
         self.latest_global_model_path = None
 
         # cold-start hidden test 평가용
-        self.hidden_test_path = "/tmp/fl_data/femto/mn1.pkl"
-        self.eval_script_path = "/home/eunjin/federated-learning/fl/evaluate_mn1_hidden_test.py"
+        self.hidden_test_path = os.getenv(
+            "FL_HIDDEN_TEST_PATH",
+            "/tmp/fl_data/femto/mn1.pkl"
+        )
+        self.eval_script_path = str(
+            PROJECT_ROOT / "archive" / "experiments" / "evaluate_mn1_hidden_test.py"
+        )
 
     # -----------------------
     # Flask notify handler
@@ -301,6 +311,30 @@ class INAECoordinator:
             print(f"  ✓ jobState: {state} (Round {round_num})")
         return r
 
+    def _ensure_initial_global_model(self):
+        """
+        Round 0 initial global model 파일을 실제로 생성한다.
+        oneM2M에는 model_path 문자열만 올라가므로,
+        대시보드가 초반부터 모델을 로드하려면 실제 .pt 파일이 필요하다.
+        """
+        os.makedirs(self.global_model_dir, exist_ok=True)
+
+        model_path = f"{self.global_model_dir}/global_round0.pt"
+
+        if os.path.exists(model_path):
+            print(f"  ✓ Initial global model already exists: {model_path}")
+            self.latest_global_model_path = model_path
+            return model_path
+
+        input_size = getattr(config, "seq_len", 2560)
+
+        model = Conv1DAE(input_size)
+        torch.save(model.state_dict(), model_path)
+
+        self.latest_global_model_path = model_path
+        print(f"  ✓ Initial global model saved: {model_path}")
+        return model_path
+
     def _publish_global_model(self, round_num: int):
         model_path = f"{self.global_model_dir}/global_round{round_num}.pt"
         data = {
@@ -484,6 +518,7 @@ class INAECoordinator:
         self._verify_acp()
 
         self._publish_job_state("FL_READY", 0)
+        self._ensure_initial_global_model()
         self._publish_global_model(0)
         print("  ✓ Initial global model ready (Round 0)")
 
@@ -501,18 +536,21 @@ class INAECoordinator:
             self._publish_job_state("FL_TRAINING", r)
 
             print("  ⏳ Wait local updates (timeout: 600s)...")
-            ok = self.collection_event.wait(timeout=600)
+            results = {}
+            start_time = time.time()
 
-            if ok:
-                print("  ✓ All results received via Notification -> aggregate now")
-                with self.collection_lock:
-                    results = dict(self.collected_results)
-            else:
-                print("  ⚠ Timeout -> polling fallback")
+            while time.time() - start_time < 600:
                 results = self._collect_results_polling(r)
 
-            if not results:
-                print("  ✗ No results, skip round")
+                if len(results) >= self.expected_nodes:
+                    print("  ✓ All results received by polling -> aggregate now")
+                    break
+
+                print(f"  ... collected {len(results)}/{self.expected_nodes}, retry in 2s")
+                time.sleep(2)
+
+            if len(results) < self.expected_nodes:
+                print(f"  ✗ Not enough results ({len(results)}/{self.expected_nodes}), skip round")
                 continue
 
             self._publish_job_state("FL_AGGREGATING", r)
