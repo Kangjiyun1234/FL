@@ -1,0 +1,232 @@
+@startuml fig_global_aggregation
+
+skinparam roundCorner 0
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 11
+skinparam DefaultFontColor #333333
+skinparam DefaultFontStyle plain
+
+skinparam sequence {
+    ParticipantBackgroundColor #C8DCF0
+    ParticipantFontName Arial
+    ParticipantFontColor black
+    ParticipantBorderColor #7BA7C7
+    ParticipantFontSize 11
+    ParticipantFontStyle bold
+
+    ArrowColor #333333
+    ArrowFontName Arial
+    ArrowFontSize 10
+    ArrowFontColor #333333
+    ArrowFontStyle plain
+
+    LifeLineBorderColor #AAAAAA
+
+    ActivationBorderColor #7BA7C7
+    ActivationBackgroundColor #C8DCF0
+
+    NoteBackgroundColor #D6EAF8
+    NoteBorderColor #7BA7C7
+    NoteFontName Arial
+    NoteFontSize 10
+    NoteFontColor #333333
+    NoteFontStyle plain
+
+    BoxBackgroundColor #EEF5FB
+    BoxBorderColor #7BA7C7
+    BoxFontName Arial
+    BoxFontColor #333333
+    BoxFontSize 11
+    BoxFontStyle bold
+}
+
+box "Factory A" #EBF5FB
+    participant "MN-AE1"  as MNAE1
+    participant "MN-CSE1" as MNCSE1
+end box
+
+box "Factory B" #EBF5FB
+    participant "MN-AE2"  as MNAE2
+    participant "MN-CSE2" as MNCSE2
+end box
+
+box "Factory C" #EBF5FB
+    participant "MN-AE3"  as MNAE3
+    participant "MN-CSE3" as MNCSE3
+end box
+
+box "Cloud Service Platform" #FEF9E7
+    participant "IN-CSE" as INCSE
+    participant "IN-AE"  as INAE
+end box
+
+' Step 1
+INCSE -> INAE : 1-1
+note right
+  NOTIFY
+
+  New contentInstance created
+  under cnt-local-updates/cnt-mn1
+end note
+
+INCSE -> INAE : 1-2
+note right
+  NOTIFY
+
+  New contentInstance created
+  under cnt-local-updates/cnt-mn2
+end note
+
+INCSE -> INAE : 1-3
+note right
+  NOTIFY
+
+  New contentInstance created
+  under cnt-local-updates/cnt-mn3
+end note
+
+note over INCSE, INAE
+  IN-AE waits until all expected
+  NOTIFY messages arrive
+  or the collection timeout occurs.
+end note
+
+' Step 2
+INAE -> INCSE : 2-1
+note right
+  Retrieve latest contentInstance
+  from cnt-local-updates/cnt-mn1
+end note
+
+INCSE --> INAE : 2-1 Local update Response
+
+INAE -> INCSE : 2-2
+note right
+  Retrieve latest contentInstance
+  from cnt-local-updates/cnt-mn2
+end note
+
+INCSE --> INAE : 2-2 Local update Response
+
+INAE -> INCSE : 2-3
+note right
+  Retrieve latest contentInstance
+  from cnt-local-updates/cnt-mn3
+end note
+
+INCSE --> INAE : 2-3 Local update Response
+
+' Step 3
+INAE -> INAE : 3
+note right
+  Validate con fields:
+  - type = fl-update
+  - round matches current round
+  - node is a registered MN-AE
+  - each node provides one update
+end note
+
+' Step 4
+INAE -> INCSE : 4
+note right
+  Create contentInstance
+  under cnt-fl-control
+
+  con:
+  - type = fl-state
+  - jobState = FL_AGGREGATING
+  - currentRound = n
+  - timestamp
+end note
+
+' Step 5
+INAE -> INAE : 5
+note right
+  Z-score-based anomaly detection:
+  identify and exclude
+  potentially poisoned updates
+end note
+
+' Step 6
+INAE -> INAE : 6
+note right
+  Apply FedAvg algorithm
+  to valid weights
+
+  Input:
+  - MN-AE1 weights
+  - MN-AE2 weights
+  - MN-AE3 weights
+end note
+
+' Step 7
+INAE -> INCSE : 7
+note right
+  Create contentInstance
+  under cnt-global-model
+
+  con:
+  - type = global-model
+  - globalRound = n
+  - modelPath
+  - modelReady
+  - timestamp
+end note
+
+' Step 8
+INAE -> INCSE : 8
+note right
+  Create contentInstance
+  under cnt-fl-control
+
+  con:
+  - type = fl-command
+  - jobState = FL_ROUND_COMPLETE
+    or FL_DONE
+  - currentRound = n
+  - globalModelUri
+  - timestamp
+end note
+
+' Step 9
+INCSE -> MNCSE1 : 9-1
+note right
+  NOTIFY
+  To: MN-AE1
+
+  Next round command
+  or FL_DONE
+end note
+
+MNCSE1 -> MNAE1 : 9-1 Forward NOTIFY
+
+INCSE -> MNCSE2 : 9-2
+note right
+  NOTIFY
+  To: MN-AE2
+
+  Next round command
+  or FL_DONE
+end note
+
+MNCSE2 -> MNAE2 : 9-2 Forward NOTIFY
+
+INCSE -> MNCSE3 : 9-3
+note right
+  NOTIFY
+  To: MN-AE3
+
+  Next round command
+  or FL_DONE
+end note
+
+MNCSE3 -> MNAE3 : 9-3 Forward NOTIFY
+
+note over INCSE, INAE
+  Even if a NOTIFY is missing,
+  IN-AE retrieves the latest CIN
+  from each node-specific container
+  after the collection timeout.
+end note
+
+@enduml

@@ -50,6 +50,11 @@ class MNAETrainer:
         self.dropbox_cnt_path  = (
             f"{config.CSE_NAME}/{config.IN_AE_NAME}"
             f"/cnt-local-updates/cnt-{self.node_name}"
+
+        # event variable
+        self.job_event = threading.Event()
+        self.job_lock = threading.Lock()
+        self.latest_job_command = None
         )
 
         self.edge_node = None
@@ -86,20 +91,38 @@ class MNAETrainer:
         def handle_notification():
             try:
                 body = request.get_json(silent=True) or {}
-                sgn  = body.get("m2m:sgn", {})
+                sgn = body.get("m2m:sgn", {})
+
+                # 1. subscription verification
                 if sgn.get("vrq") is True:
-                    print(f"  [VERIFY] {self.node_name} subscription verification OK")
+                    print(f" [VERIFY] {self.node_name} subscription verification OK")
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
+                
+                # 2. normal notification: round command 수신
+                command = self._parse_cin_con_from_notification(sgn)
+                if command:
+                    state = command.get("jobState")
+                    current_round = int(command.get("currentRound", 0))
+                    if state in ("FL_TRAINING", "FL_COMPLETED"):
+                        with self.job_lock:
+                            self.latest_job_command = command
+                        print(
+                            f" [NOTIFY] {self.node_name} command received: "
+                            f"{state}, round={current_round}"
+                        )
+                        self.job_event.set()
+                        
                 resp = make_response("", 200)
                 resp.headers["X-M2M-RSC"] = "2000"
                 return resp
-            except Exception as e:
-                print(f"  ✗ notify error: {e}")
-                return make_response("", 500)
 
+    except Exception as e:
+        print(f" ✗ notify error: {e}")
+        return make_response("", 500)
     def start_server(self):
+
         def run():
             self.app.run(
                 host="0.0.0.0", port=self.notification_port,
@@ -369,6 +392,23 @@ class MNAETrainer:
         if r:
             print(f"  ✓ uploaded -> {self.dropbox_cnt_path} (round {round_num})")
         return r
+
+    def _parse_cin_con_from_notification(self, sgn: dict):
+        nev = sgn.get("nev", {})
+        rep = nev.get("rep", {})
+
+        cin = rep.get("m2m:cin")
+        if not cin:
+            return None
+
+        con = cin.get("con")
+        if con is None:
+            return None
+
+        try:
+            return json.loads(con) if isinstance(con, str) else con
+        except Exception:
+            return None
 
     # ---------------------------
     # Main loop

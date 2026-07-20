@@ -1,0 +1,199 @@
+@startuml fig_global_distribution
+
+skinparam roundCorner 0
+skinparam DefaultFontName Arial
+skinparam DefaultFontSize 11
+skinparam DefaultFontColor #333333
+skinparam DefaultFontStyle plain
+
+skinparam sequence {
+    ParticipantBackgroundColor #C8DCF0
+    ParticipantFontName Arial
+    ParticipantFontColor black
+    ParticipantBorderColor #7BA7C7
+    ParticipantFontSize 11
+    ParticipantFontStyle bold
+
+    ArrowColor #333333
+    ArrowFontName Arial
+    ArrowFontSize 10
+    ArrowFontColor #333333
+    ArrowFontStyle plain
+
+    LifeLineBorderColor #AAAAAA
+
+    ActivationBorderColor #7BA7C7
+    ActivationBackgroundColor #C8DCF0
+
+    NoteBackgroundColor #D6EAF8
+    NoteBorderColor #7BA7C7
+    NoteFontName Arial
+    NoteFontSize 10
+    NoteFontColor #333333
+    NoteFontStyle plain
+
+    BoxBackgroundColor #EEF5FB
+    BoxBorderColor #7BA7C7
+    BoxFontName Arial
+    BoxFontColor #333333
+    BoxFontSize 11
+    BoxFontStyle bold
+}
+
+box "Factory A" #EBF5FB
+    participant "MN-AE1"  as MNAE1
+    participant "MN-CSE1" as MNCSE1
+end box
+
+box "Factory B" #EBF5FB
+    participant "MN-AE2"  as MNAE2
+    participant "MN-CSE2" as MNCSE2
+end box
+
+box "Factory C" #EBF5FB
+    participant "MN-AE3"  as MNAE3
+    participant "MN-CSE3" as MNCSE3
+end box
+
+box "Cloud Service Platform" #FEF9E7
+    participant "IN-CSE" as INCSE
+    participant "IN-AE"  as INAE
+end box
+
+' Step 1
+INAE -> INCSE : 1
+note right
+  Create contentInstance
+  under cnt-global-model
+
+  con:
+  - type = global-model
+  - globalRound = n
+  - modelPath
+  - modelReady
+  - timestamp
+end note
+
+' Step 2
+INAE -> INCSE : 2
+note right
+  Create contentInstance
+  under cnt-fl-control
+
+  con:
+  - type = fl-command
+  - jobState = TRAINING
+  - currentRound = n
+  - globalModelUri
+  - securityMode
+  - privacyParams
+  - maxRounds
+  - timestamp
+end note
+
+' Step 3
+INCSE -> MNCSE1 : 3-1
+note right
+  NOTIFY
+  To: MN-AE1
+
+  New contentInstance created
+  under cnt-fl-control
+end note
+
+MNCSE1 -> MNAE1 : 3-1 Forward NOTIFY
+
+INCSE -> MNCSE2 : 3-2
+note right
+  NOTIFY
+  To: MN-AE2
+
+  New contentInstance created
+  under cnt-fl-control
+end note
+
+MNCSE2 -> MNAE2 : 3-2 Forward NOTIFY
+
+INCSE -> MNCSE3 : 3-3
+note right
+  NOTIFY
+  To: MN-AE3
+
+  New contentInstance created
+  under cnt-fl-control
+end note
+
+MNCSE3 -> MNAE3 : 3-3 Forward NOTIFY
+
+' Step 4
+MNAE1 -> MNCSE1 : 4-1
+note right
+  RETRIEVE global model
+  using globalModelUri
+end note
+
+MNCSE1 -> INCSE : 4-1 Forward RETRIEVE
+INCSE --> MNCSE1 : 4-1 Global model Response
+MNCSE1 --> MNAE1 : 4-1 Forward Response
+
+MNAE2 -> MNCSE2 : 4-2
+note right
+  RETRIEVE global model
+  using globalModelUri
+end note
+
+MNCSE2 -> INCSE : 4-2 Forward RETRIEVE
+INCSE --> MNCSE2 : 4-2 Global model Response
+MNCSE2 --> MNAE2 : 4-2 Forward Response
+
+MNAE3 -> MNCSE3 : 4-3
+note right
+  RETRIEVE global model
+  using globalModelUri
+end note
+
+MNCSE3 -> INCSE : 4-3 Forward RETRIEVE
+INCSE --> MNCSE3 : 4-3 Global model Response
+MNCSE3 --> MNAE3 : 4-3 Forward Response
+
+' Step 5
+MNAE1 -> MNCSE1 : 5-1
+note right
+  Create global model contentInstance
+  under MN-AE1/cnt-local-model
+
+  con:
+  - type = global-model
+  - globalRound = n
+  - modelPath
+  - modelReady
+  - timestamp
+end note
+
+MNAE2 -> MNCSE2 : 5-2
+note right
+  Create global model contentInstance
+  under MN-AE2/cnt-local-model
+
+  con:
+  - type = global-model
+  - globalRound = n
+  - modelPath
+  - modelReady
+  - timestamp
+end note
+
+MNAE3 -> MNCSE3 : 5-3
+note right
+  Create global model contentInstance
+  under MN-AE3/cnt-local-model
+
+  con:
+  - type = global-model
+  - globalRound = n
+  - modelPath
+  - modelReady
+  - timestamp
+end note
+
+@enduml
