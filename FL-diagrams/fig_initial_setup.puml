@@ -41,335 +41,304 @@ skinparam sequence {
 }
 
 box "Factory A" #EBF5FB
-    participant "ADN-AE1" as ADN1
-    participant "MN-AE1"  as MNAE1
-    participant "MN-CSE1" as MNCSE1
+participant "ADN-AE1" as ADN1
+participant "MN-AE1" as MNAE1
+participant "MN-CSE1" as MNCSE1
 end box
 
 box "Factory B" #EBF5FB
-    participant "ADN-AE2" as ADN2
-    participant "MN-AE2"  as MNAE2
-    participant "MN-CSE2" as MNCSE2
+participant "ADN-AE2" as ADN2
+participant "MN-AE2" as MNAE2
+participant "MN-CSE2" as MNCSE2
 end box
 
 box "Factory C" #EBF5FB
-    participant "ADN-AE3" as ADN3
-    participant "MN-AE3"  as MNAE3
-    participant "MN-CSE3" as MNCSE3
+participant "ADN-AE3" as ADN3
+participant "MN-AE3" as MNAE3
+participant "MN-CSE3" as MNCSE3
 end box
 
 box "Cloud Service Platform" #FEF9E7
-    participant "IN-CSE" as INCSE
-    participant "IN-AE"  as INAE
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
 end box
+
 
 ' Step 1
 INAE -> INCSE : 1
 note right
-  Register IN-AE (Mca)
+Register IN-AE (Mca)
 end note
+
 
 ' Step 2
 MNCSE1 -> INCSE : 2-1
 note right
-  Register MN-CSE1
-  to IN-CSE (Mcc)
+Register MN-CSE1 to IN-CSE (Mcc)
 end note
 
 MNCSE2 -> INCSE : 2-2
 note right
-  Register MN-CSE2
-  to IN-CSE (Mcc)
+Register MN-CSE2 to IN-CSE (Mcc)
 end note
 
 MNCSE3 -> INCSE : 2-3
 note right
-  Register MN-CSE3
-  to IN-CSE (Mcc)
+Register MN-CSE3 to IN-CSE (Mcc)
 end note
+
 
 ' Step 3
 MNAE1 -> MNCSE1 : 3-1
 note right
-  Register MN-AE1 (Mca)
+Register MN-AE1 (Mca)
 end note
 
 MNAE2 -> MNCSE2 : 3-2
 note right
-  Register MN-AE2 (Mca)
+Register MN-AE2 (Mca)
 end note
 
 MNAE3 -> MNCSE3 : 3-3
 note right
-  Register MN-AE3 (Mca)
+Register MN-AE3 (Mca)
 end note
+
 
 ' Step 4
 ADN1 -> MNCSE1 : 4-1
 note right
-  Register ADN-AE1
-  to MN-CSE1 (Mca)
+Register ADN-AE1 to MN-CSE1 (Mca)
 end note
 
 ADN2 -> MNCSE2 : 4-2
 note right
-  Register ADN-AE2
-  to MN-CSE2 (Mca)
+Register ADN-AE2 to MN-CSE2 (Mca)
 end note
 
 ADN3 -> MNCSE3 : 4-3
 note right
-  Register ADN-AE3
-  to MN-CSE3 (Mca)
+Register ADN-AE3 to MN-CSE3 (Mca)
 end note
+
 
 ' Step 4-A: Create ACPs on IN-CSE
 INAE -> INCSE : 4-A-1
 note right
-  Create accessControlPolicy:
-  - acp-fl-control
+Create accessControlPolicy:
+- acp-fl-control
 end note
 
 INAE -> INCSE : 4-A-2
 note right
-  Create accessControlPolicy:
-  - acp-global-model
+Create accessControlPolicy:
+- acp-global-model
 end note
 
 INAE -> INCSE : 4-A-3
 note right
-  Create accessControlPolicy:
-  - acp-local-update-mn1
+Create accessControlPolicy:
+- acp-local-update-mn1
 end note
 
 INAE -> INCSE : 4-A-4
 note right
-  Create accessControlPolicy:
-  - acp-local-update-mn2
+Create accessControlPolicy:
+- acp-local-update-mn2
 end note
 
 INAE -> INCSE : 4-A-5
 note right
-  Create accessControlPolicy:
-  - acp-local-update-mn3
+Create accessControlPolicy:
+- acp-local-update-mn3
 end note
+
 
 ' Step 4-B: Create local ACPs on each MN-CSE
 MNAE1 -> MNCSE1 : 4-B-1
 note right
-  Create local accessControlPolicies:
-  - acp-sensor-data-1
-  - acp-local-model-1
+Create local accessControlPolicies:
+- acp-sensor-data-1
+- acp-local-model-1
 end note
 
 MNAE2 -> MNCSE2 : 4-B-2
 note right
-  Create local accessControlPolicies:
-  - acp-sensor-data-2
-  - acp-local-model-2
+Create local accessControlPolicies:
+- acp-sensor-data-2
+- acp-local-model-2
 end note
 
 MNAE3 -> MNCSE3 : 4-B-3
 note right
-  Create local accessControlPolicies:
-  - acp-sensor-data-3
-  - acp-local-model-3
+Create local accessControlPolicies:
+- acp-sensor-data-3
+- acp-local-model-3
 end note
+
 
 ' Step 5
 INAE -> INCSE : 5
 note right
-  Create FL management containers:
-
-  - cnt-fl-control
-    acpi: acp-fl-control
-
-  - cnt-global-model
-    acpi: acp-global-model
-
-  - cnt-local-updates
-    - cnt-mn1
-      acpi: acp-local-update-mn1
-
-    - cnt-mn2
-      acpi: acp-local-update-mn2
-
-    - cnt-mn3
-      acpi: acp-local-update-mn3
+Create FL management containers:
+- cnt-fl-control
+  acpi: acp-fl-control
+- cnt-global-model
+  acpi: acp-global-model
+- cnt-local-updates
+  - cnt-mn1
+    acpi: acp-local-update-mn1
+  - cnt-mn2
+    acpi: acp-local-update-mn2
+  - cnt-mn3
+    acpi: acp-local-update-mn3
 end note
+
 
 ' Step 6
 MNAE1 -> MNCSE1 : 6-1
 note right
-  Create local containers on MN-CSE1:
-
-  - cnt-sensor-data
-    acpi: acp-sensor-data-1
-
-  - cnt-local-model
-    acpi: acp-local-model-1
+Create local containers on MN-CSE1:
+- cnt-sensor-data
+  acpi: acp-sensor-data-1
+- cnt-local-model
+  acpi: acp-local-model-1
 end note
 
 MNAE2 -> MNCSE2 : 6-2
 note right
-  Create local containers on MN-CSE2:
-
-  - cnt-sensor-data
-    acpi: acp-sensor-data-2
-
-  - cnt-local-model
-    acpi: acp-local-model-2
+Create local containers on MN-CSE2:
+- cnt-sensor-data
+  acpi: acp-sensor-data-2
+- cnt-local-model
+  acpi: acp-local-model-2
 end note
 
 MNAE3 -> MNCSE3 : 6-3
 note right
-  Create local containers on MN-CSE3:
-
-  - cnt-sensor-data
-    acpi: acp-sensor-data-3
-
-  - cnt-local-model
-    acpi: acp-local-model-3
+Create local containers on MN-CSE3:
+- cnt-sensor-data
+  acpi: acp-sensor-data-3
+- cnt-local-model
+  acpi: acp-local-model-3
 end note
+
 
 ' Step 7
 ADN1 -> MNCSE1 : 7-1
 note right
-  Upload sensor metadata
-  to cnt-sensor-data
+Upload sensor metadata
+to cnt-sensor-data
 end note
 
 ADN2 -> MNCSE2 : 7-2
 note right
-  Upload sensor metadata
-  to cnt-sensor-data
+Upload sensor metadata
+to cnt-sensor-data
 end note
 
 ADN3 -> MNCSE3 : 7-3
 note right
-  Upload sensor metadata
-  to cnt-sensor-data
+Upload sensor metadata
+to cnt-sensor-data
 end note
+
 
 ' Step 8-1
 MNAE1 -> MNCSE1 : 8-1
 note right
-  Create subscription:
-  - To: cnt-fl-control
-  - notificationURI: MN-AE1
+Create subscription:
+- To: cnt-fl-control
+- notificationURI: MN-AE1
+- enc.net: [3]
 end note
 
 MNCSE1 -> INCSE : 8-1 Forward CREATE
 
-opt Notification target verification required
-    INCSE -> MNCSE1 : Verification NOTIFY
-    note right
-      verificationRequest = true
-    end note
+INCSE -> MNCSE1 : Verification NOTIFY
+note right
+verificationRequest = true
+end note
 
-    MNCSE1 -> MNAE1 : Forward verification NOTIFY
-    MNAE1 --> MNCSE1 : Notify Response
-    MNCSE1 --> INCSE : Forward Notify Response
-end
+MNCSE1 -> MNAE1 : Forward verification NOTIFY
+MNAE1 --> MNCSE1 : Notify Response
+MNCSE1 --> INCSE : Forward Notify Response
 
-alt MN-AE1 subscription creation succeeded
-    INCSE --> MNCSE1 : CREATE Response
-    MNCSE1 --> MNAE1 : Forward success Response
-else MN-AE1 subscription creation failed
-    INCSE --> MNCSE1 : Error Response
-    MNCSE1 --> MNAE1 : Forward error Response
-end
+INCSE --> MNCSE1 : CREATE Response
+MNCSE1 --> MNAE1 : Forward success Response
+
 
 ' Step 8-2
 MNAE2 -> MNCSE2 : 8-2
 note right
-  Create subscription:
-  - To: cnt-fl-control
-  - notificationURI: MN-AE2
+Create subscription:
+- To: cnt-fl-control
+- notificationURI: MN-AE2
+- enc.net: [3]
 end note
 
 MNCSE2 -> INCSE : 8-2 Forward CREATE
 
-opt Notification target verification required
-    INCSE -> MNCSE2 : Verification NOTIFY
-    note right
-      verificationRequest = true
-    end note
+INCSE -> MNCSE2 : Verification NOTIFY
+note right
+verificationRequest = true
+end note
 
-    MNCSE2 -> MNAE2 : Forward verification NOTIFY
-    MNAE2 --> MNCSE2 : Notify Response
-    MNCSE2 --> INCSE : Forward Notify Response
-end
+MNCSE2 -> MNAE2 : Forward verification NOTIFY
+MNAE2 --> MNCSE2 : Notify Response
+MNCSE2 --> INCSE : Forward Notify Response
 
-alt MN-AE2 subscription creation succeeded
-    INCSE --> MNCSE2 : CREATE Response
-    MNCSE2 --> MNAE2 : Forward success Response
-else MN-AE2 subscription creation failed
-    INCSE --> MNCSE2 : Error Response
-    MNCSE2 --> MNAE2 : Forward error Response
-end
+INCSE --> MNCSE2 : CREATE Response
+MNCSE2 --> MNAE2 : Forward success Response
+
 
 ' Step 8-3
 MNAE3 -> MNCSE3 : 8-3
 note right
-  Create subscription:
-  - To: cnt-fl-control
-  - notificationURI: MN-AE3
+Create subscription:
+- To: cnt-fl-control
+- notificationURI: MN-AE3
+- enc.net: [3]
 end note
 
 MNCSE3 -> INCSE : 8-3 Forward CREATE
 
-opt Notification target verification required
-    INCSE -> MNCSE3 : Verification NOTIFY
-    note right
-      verificationRequest = true
-    end note
+INCSE -> MNCSE3 : Verification NOTIFY
+note right
+verificationRequest = true
+end note
 
-    MNCSE3 -> MNAE3 : Forward verification NOTIFY
-    MNAE3 --> MNCSE3 : Notify Response
-    MNCSE3 --> INCSE : Forward Notify Response
-end
+MNCSE3 -> MNAE3 : Forward verification NOTIFY
+MNAE3 --> MNCSE3 : Notify Response
+MNCSE3 --> INCSE : Forward Notify Response
 
-alt MN-AE3 subscription creation succeeded
-    INCSE --> MNCSE3 : CREATE Response
-    MNCSE3 --> MNAE3 : Forward success Response
-else MN-AE3 subscription creation failed
-    INCSE --> MNCSE3 : Error Response
-    MNCSE3 --> MNAE3 : Forward error Response
-end
+INCSE --> MNCSE3 : CREATE Response
+MNCSE3 --> MNAE3 : Forward success Response
+
 
 ' Step 9
 INAE -> INCSE : 9
 note right
-  Create subscriptions to:
-  - cnt-local-updates/cnt-mn1
-  - cnt-local-updates/cnt-mn2
-  - cnt-local-updates/cnt-mn3
+Create subscriptions to:
+- cnt-local-updates/cnt-mn1
+- cnt-local-updates/cnt-mn2
+- cnt-local-updates/cnt-mn3
 
-  notificationURI: IN-AE
+notificationURI: IN-AE
+enc.net: [3]
 end note
 
-opt Notification target verification required
-    INCSE -> INAE : Verification NOTIFY
-    note right
-      verificationRequest = true
-    end note
+INCSE -> INAE : Verification NOTIFY
+note right
+verificationRequest = true
+end note
 
-    INAE --> INCSE : Notify Response
-end
+INAE --> INCSE : Notify Response
+INCSE --> INAE : CREATE Response
 
-alt IN-AE subscription creation succeeded
-    INCSE --> INAE : CREATE Response
-    note right
-      Subscription is reused
-      across multiple FL rounds.
-    end note
-else IN-AE subscription creation failed
-    INCSE --> INAE : Error Response
-    note right
-      Automatic local-update
-      NOTIFY is unavailable.
-    end note
-end
+note right
+Subscriptions are reused
+across multiple FL rounds.
+end note
 
 @enduml

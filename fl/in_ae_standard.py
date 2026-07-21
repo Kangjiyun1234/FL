@@ -55,6 +55,13 @@ class INAECoordinator:
         self.collection_timeout_sec = float(
             os.getenv("FL_COLLECTION_NOTIFY_TIMEOUT", "600")
         )
+        self.command_subscription_wait_sec = float(
+            os.getenv("FL_COMMAND_SUBSCRIPTION_WAIT", "60")
+        )
+        self.model_publish_settle_sec = float(
+            os.getenv("FL_MODEL_PUBLISH_SETTLE_SEC", "1.0")
+        )
+        self.current_global_model_uri = None
 
         # -----------------------
         # 추가: 글로벌 모델/평가 경로
@@ -308,7 +315,7 @@ class INAECoordinator:
 
         def check(method, path, origin, data=None, expect_ok=True):
             h = {
-                "X-M2M-RI":     "acp-verify",
+                "X-M2M-RI":     f"acp-verify-{time.time_ns()}",
                 "X-M2M-RVI":    "2a",
                 "X-M2M-Origin": origin,
                 "Content-Type": "application/json;ty=4",
@@ -357,7 +364,8 @@ class INAECoordinator:
         print("\n  [2] 차단돼야 하는 접근")
         check("get",  f"{cse}/MN-AE-2/cnt-sensor-data",                "CMN-AE-1", expect_ok=False)
         check("get",  f"{cse}/{config.IN_AE_NAME}/cnt-local-updates/cnt-mn2", "CMN-AE-1", data=cin, expect_ok=False)
-        check("post", f"{cse}/{config.IN_AE_NAME}/cnt-fl-control",     "CMN-AE-1", data=cin, expect_ok=False)
+        # cnt-fl-control에 POST 테스트 CIN을 만들면 ACP 오설정 시 실제
+        # FL command 알림으로 전파될 수 있으므로 여기서는 수행하지 않음.
         check("get",  f"{cse}/MN-AE-1/cnt-local-model",                "CMN-AE-2", expect_ok=False)
         check("get",  f"{cse}/{config.IN_AE_NAME}/cnt-local-updates/cnt-mn1", "CMN-AE-3", data=cin, expect_ok=False)
         check("get",  f"{cse}/{config.IN_AE_NAME}/cnt-local-updates/cnt-mn1", "CMN-AE-1", data=cin, expect_ok=False)
@@ -368,7 +376,9 @@ class INAECoordinator:
         check("get",  f"{cse}/{config.IN_AE_NAME}/cnt-global-model",   "CMN-AE-2", expect_ok=True)
         check("get",  f"{cse}/MN-AE-3/cnt-sensor-data",                "CMN-AE-3", expect_ok=True)
         check("get",  f"{cse}/MN-AE-3/cnt-local-model",                "CMN-AE-3", data=cin, expect_ok=True)
-        check("post", f"{cse}/{config.IN_AE_NAME}/cnt-fl-control",     "CIN-AE",   data=cin, expect_ok=True)
+        # 실제 cnt-fl-control에 테스트 CIN을 만들면 MN-AE에 불필요한
+        # NOTIFY가 발생하므로 허용 검증은 RETRIEVE로만 수행함.
+        check("get",  f"{cse}/{config.IN_AE_NAME}/cnt-fl-control",     "CIN-AE",   expect_ok=True)
         check("get",  f"{cse}/{config.IN_AE_NAME}/cnt-local-updates/cnt-mn1", "CIN-AE", expect_ok=True)
         print()
 
@@ -428,6 +438,42 @@ class INAECoordinator:
             if res:
                 print(f"    ✓ {node} subscribed -> {cnt_path}")
 
+    def _wait_for_mn_command_subscriptions(self) -> bool:
+        """
+        Round 1 command를 발행하기 전에 모든 MN-AE의 cnt-fl-control
+        subscription이 생성됐는지 확인함.
+
+        이 확인은 FL round polling이 아니라 시작 시점의 readiness barrier임.
+        """
+        deadline = time.time() + self.command_subscription_wait_sec
+        expected = {
+            node: f"{self.fl_control_path}/sub_{node}"
+            for node in self.node_names
+        }
+        ready = set()
+
+        print("\n  Wait for MN-AE command subscriptions...")
+
+        while time.time() < deadline:
+            for node, sub_path in expected.items():
+                if node in ready:
+                    continue
+                if om2m.get_resource(sub_path):
+                    ready.add(node)
+                    print(f"    ✓ {node} command subscription ready")
+
+            if len(ready) == self.expected_nodes:
+                return True
+
+            time.sleep(1.0)
+
+        missing = [node for node in self.node_names if node not in ready]
+        print(
+            f"  ✗ command subscription readiness timeout; "
+            f"missing={missing}"
+        )
+        return False
+
     # -----------------------
     # FL publish
     # -----------------------
@@ -442,18 +488,18 @@ class INAECoordinator:
             "currentRound": round_num,
             "maxRounds": self.max_rounds,
             "globalModelUri": (
-                f"{self.global_model_path}/la"
+                self.current_global_model_uri
+                or f"{self.global_model_path}/la"
             ),
             "securityMode": "DP",
             "privacyParams": {
                 "epsilon": config.DP_EPSILON,
                 "delta": config.DP_DELTA,
-                "max_grad_norm": (
-                    config.DP_MAX_GRAD_NORM
-                ),
+                "max_grad_norm": config.DP_MAX_GRAD_NORM,
             },
             "timestamp": time.time(),
         }
+
         result = om2m.create_content_instance(
             self.fl_control_path,
             data
@@ -462,49 +508,94 @@ class INAECoordinator:
         if result:
             print(
                 f"  ✓ jobState: {state} "
-                f"(Round {round_num})"
+                f"(Round {round_num}, model={data['globalModelUri']})"
+            )
+        else:
+            print(
+                f"  ✗ failed to publish jobState={state} "
+                f"for round {round_num}"
             )
 
         return result
 
-    def _ensure_initial_global_model(self):
-        """
-        Round 0 initial global model 파일을 실제로 생성한다.
-        oneM2M에는 model_path 문자열만 올라가므로,
-        대시보드가 초반부터 모델을 로드하려면 실제 .pt 파일이 필요하다.
-        """
-        os.makedirs(self.global_model_dir, exist_ok=True)
+    @staticmethod
+    def _state_dict_matches_model(model: torch.nn.Module, state_dict: dict) -> bool:
+        if not isinstance(state_dict, dict):
+            return False
 
-        model_path = f"{self.global_model_dir}/global_round0.pt"
+        expected = model.state_dict()
+        if set(expected) != set(state_dict):
+            return False
 
-        if os.path.exists(model_path):
-            print(f"  ✓ Initial global model already exists: {model_path}")
-            self.latest_global_model_path = model_path
-            return model_path
-
-        ae_cfg = getattr(
-            config,
-            "AE_CFG",
-            config.AEConfig()
+        return all(
+            tuple(expected[key].shape) == tuple(state_dict[key].shape)
+            for key in expected
         )
 
+    def _ensure_initial_global_model(self):
+        """
+        MN-AE와 동일한 Conv1DAE 구조로 Round 0 모델을 준비함.
+        기존 파일이 현재 설정과 호환되지 않으면 자동으로 다시 생성함.
+        """
+        os.makedirs(self.global_model_dir, exist_ok=True)
+        model_path = os.path.join(
+            self.global_model_dir,
+            "global_round0.pt"
+        )
+
+        ae_cfg = getattr(config, "AE_CFG", config.AEConfig())
         model = Conv1DAE(
             n_channels=ae_cfg.n_channels,
             latent_dim=ae_cfg.latent_dim,
             seq_len=ae_cfg.seq_len,
         )
 
-        torch.save(model.state_dict(), model_path)
+        reuse_existing = False
+        if os.path.exists(model_path):
+            try:
+                existing = torch.load(model_path, map_location="cpu")
+                reuse_existing = self._state_dict_matches_model(
+                    model,
+                    existing
+                )
+            except Exception as exc:
+                print(
+                    f"  ⚠ failed to inspect existing Round 0 model: {exc}"
+                )
+
+        if reuse_existing:
+            print(
+                f"  ✓ Initial global model is compatible: {model_path}"
+            )
+        else:
+            if os.path.exists(model_path):
+                print(
+                    "  ⚠ incompatible Round 0 checkpoint detected; "
+                    "recreate it"
+                )
+            torch.save(model.state_dict(), model_path)
+            print(
+                f"  ✓ Initial global model saved: {model_path} "
+                f"(channels={ae_cfg.n_channels}, "
+                f"latent={ae_cfg.latent_dim}, "
+                f"seq_len={ae_cfg.seq_len})"
+            )
 
         self.latest_global_model_path = model_path
-        print(f"  ✓ Initial global model saved: {model_path}")
         return model_path
 
     def _publish_global_model(self, round_num: int):
-        model_path = (
-            f"{self.global_model_dir}/"
+        model_path = os.path.join(
+            self.global_model_dir,
             f"global_round{round_num}.pt"
         )
+
+        if not os.path.exists(model_path):
+            print(
+                f"  ✗ global model file does not exist: {model_path}"
+            )
+            return None
+
         data = {
             "type": "global-model",
             "global_round": round_num,
@@ -517,11 +608,29 @@ class INAECoordinator:
             data
         )
 
-        if result:
+        if not result:
             print(
-                f"  ✓ Global model published "
-                f"Round {round_num}"
+                f"  ✗ failed to publish global model Round {round_num}"
             )
+            return None
+
+        cin = result.get("m2m:cin", {}) if isinstance(result, dict) else {}
+        resource_name = cin.get("rn")
+        self.current_global_model_uri = (
+            f"{self.global_model_path}/{resource_name}"
+            if resource_name
+            else f"{self.global_model_path}/la"
+        )
+
+        self.latest_global_model_path = model_path
+        print(
+            f"  ✓ Global model published Round {round_num} "
+            f"-> {self.current_global_model_uri}"
+        )
+
+        # TinyIoT가 CIN을 DB에 반영한 뒤 command NOTIFY를 보내도록 짧게 대기
+        if self.model_publish_settle_sec > 0:
+            time.sleep(self.model_publish_settle_sec)
 
         return result
 
@@ -757,9 +866,20 @@ class INAECoordinator:
         # ACP 검증
         self._verify_acp()
 
-        self._publish_job_state("FL_READY", 0)
+        # Round 1 command를 놓치지 않도록 MN-AE 구독이 모두 준비될 때까지 대기
+        if not self._wait_for_mn_command_subscriptions():
+            print("  ✗ FL start aborted: MN-AE subscriptions are not ready")
+            return
+
         self._ensure_initial_global_model()
-        self._publish_global_model(0)
+        if not self._publish_global_model(0):
+            print("  ✗ FL start aborted: failed to publish Round 0 model")
+            return
+
+        if not self._publish_job_state("FL_READY", 0):
+            print("  ✗ FL start aborted: failed to publish FL_READY")
+            return
+
         print("  ✓ Initial global model ready (Round 0)")
 
         for r in range(1, self.max_rounds + 1):
@@ -769,14 +889,14 @@ class INAECoordinator:
             print(f"GLOBAL ROUND {r}/{self.max_rounds}")
             print("=" * 60)
 
-            # 이번 라운드의 알림 수집 상태 초기화
             self.collection_event.clear()
-
             with self.collection_lock:
                 self.collected_results = {}
 
-            # 이 CIN 생성으로 MN-AE에 NOTIFY가 전달됨
-            self._publish_job_state("FL_TRAINING", r)
+            # 현재 global model URI를 포함한 round command CIN 생성
+            if not self._publish_job_state("FL_TRAINING", r):
+                print(f"  ✗ failed to start round {r}; abort FL")
+                return
 
             print(
                 f"  ⏳ Wait local-update NOTIFY "
@@ -795,28 +915,24 @@ class INAECoordinator:
                     "  ✓ All results received by NOTIFY "
                     "-> aggregate now"
                 )
-
             else:
                 missing_nodes = [
                     node
                     for node in self.node_names
                     if node not in results
                 ]
-
                 print(
                     f"  ⚠ NOTIFY timeout: collected "
                     f"{len(results)}/{self.expected_nodes}; "
                     f"single fallback RETRIEVE for {missing_nodes}"
                 )
-
-                fallback_results = self._collect_results_latest(
-                    r,
-                    nodes=missing_nodes
+                results.update(
+                    self._collect_results_latest(
+                        r,
+                        nodes=missing_nodes
+                    )
                 )
 
-                results.update(fallback_results)
-
-            # timeout 복구 후에도 부족하면 다음 라운드로 넘어가지 않음
             if len(results) < self.expected_nodes:
                 print(
                     f"  ✗ Not enough results "
@@ -825,16 +941,11 @@ class INAECoordinator:
                 )
                 return
 
-            self._publish_job_state(
-                "FL_AGGREGATING",
-                r
-            )
+            if not self._publish_job_state("FL_AGGREGATING", r):
+                print(f"  ✗ failed to publish aggregation state for round {r}")
+                return
 
-            _, final_path = self._aggregate(
-                results,
-                r
-            )
-
+            _, final_path = self._aggregate(results, r)
             if not final_path or not os.path.exists(final_path):
                 print(
                     f"  ✗ Aggregation failed in round {r}; "
@@ -842,14 +953,15 @@ class INAECoordinator:
                 )
                 return
 
-            self._publish_global_model(r)
+            if not self._publish_global_model(r):
+                print(
+                    f"  ✗ failed to publish global model for round {r}; "
+                    "abort FL"
+                )
+                return
 
         print("\nFederated learning completed!")
         self._publish_job_state("FL_COMPLETED", self.max_rounds)
-
-        # -----------------------
-        # 추가: FL 완료 후 cold-start hidden test 자동 평가
-        # -----------------------
         self._run_cold_start_eval()
 
 
