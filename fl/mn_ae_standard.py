@@ -47,14 +47,19 @@ class MNAETrainer:
         self.global_model_path = f"{config.CSE_NAME}/{config.IN_AE_NAME}/cnt-global-model"
 
         # Drop-box
-        self.dropbox_cnt_path  = (
+        self.dropbox_cnt_path = (
             f"{config.CSE_NAME}/{config.IN_AE_NAME}"
             f"/cnt-local-updates/cnt-{self.node_name}"
+        )
 
-        # event variable
+        # NOTIFY 기반 round 시작
         self.job_event = threading.Event()
         self.job_lock = threading.Lock()
         self.latest_job_command = None
+
+        # NOTIFY가 누락됐을 때만 /la를 한 번 확인하기 위한 timeout
+        self.command_wait_timeout_sec = float(
+            os.getenv("FL_COMMAND_NOTIFY_TIMEOUT", "30")
         )
 
         self.edge_node = None
@@ -93,36 +98,104 @@ class MNAETrainer:
                 body = request.get_json(silent=True) or {}
                 sgn = body.get("m2m:sgn", {})
 
-                # 1. subscription verification
+                # Subscription verification
                 if sgn.get("vrq") is True:
-                    print(f" [VERIFY] {self.node_name} subscription verification OK")
+                    print(
+                        f"  [VERIFY] {self.node_name} "
+                        f"subscription verification OK"
+                    )
+
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
-                
-                # 2. normal notification: round command 수신
+
+                nev = sgn.get("nev", {}) or {}
+                net = nev.get("net", 0)
+                net_values = net if isinstance(net, list) else [net]
+
+                try:
+                    is_cin_created = 3 in {
+                        int(value) for value in net_values
+                    }
+                except (TypeError, ValueError):
+                    is_cin_created = False
+
+                if not is_cin_created:
+                    resp = make_response("", 200)
+                    resp.headers["X-M2M-RSC"] = "2000"
+                    return resp
+
+                # 정상 경로:
+                # round command CIN의 con을 NOTIFY body에서 읽음
                 command = self._parse_cin_con_from_notification(sgn)
+
+                # TinyIoT가 rep를 보내지 않은 경우에만
+                # NOTIFY를 계기로 최신 CIN을 한 번 조회
+                if command is None:
+                    command = self._get_current_job_state()
+
                 if command:
-                    state = command.get("jobState")
-                    current_round = int(command.get("currentRound", 0))
-                    if state in ("FL_TRAINING", "FL_COMPLETED"):
+                    state = str(command.get("jobState", ""))
+
+                    try:
+                        current_round = int(
+                            command.get("currentRound", 0)
+                        )
+                    except (TypeError, ValueError):
+                        current_round = 0
+
+                    command_type = (
+                        str(command.get("type", ""))
+                        .lower()
+                        .replace("_", "-")
+                    )
+
+                    if command_type and command_type != "fl-command":
+                        print(
+                            f"  ⚠ {self.node_name}: "
+                            f"ignore command type={command_type!r}"
+                        )
+
+                    elif state in ("FL_TRAINING", "FL_COMPLETED"):
                         with self.job_lock:
                             self.latest_job_command = command
+
                         print(
-                            f" [NOTIFY] {self.node_name} command received: "
+                            f"  [NOTIFY] {self.node_name} "
+                            f"command received: "
                             f"{state}, round={current_round}"
                         )
+
                         self.job_event.set()
-                        
+
                 resp = make_response("", 200)
                 resp.headers["X-M2M-RSC"] = "2000"
                 return resp
 
-    except Exception as e:
-        print(f" ✗ notify error: {e}")
-        return make_response("", 500)
-    def start_server(self):
+            except Exception as e:
+                print(f"  ✗ notify error: {e}")
+                return make_response("", 500)
 
+    def _parse_cin_con_from_notification(self, sgn: dict):
+        nev = sgn.get("nev", {}) or {}
+        rep = nev.get("rep", {}) or {}
+
+        cin = rep.get("m2m:cin")
+        if not isinstance(cin, dict):
+            return None
+
+        con = cin.get("con")
+        if con is None:
+            return None
+
+        try:
+            data = json.loads(con) if isinstance(con, str) else con
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+        return data if isinstance(data, dict) else None
+
+    def start_server(self):
         def run():
             self.app.run(
                 host="0.0.0.0", port=self.notification_port,
@@ -132,6 +205,72 @@ class MNAETrainer:
         th.start()
         time.sleep(1)
         print(f"  ✓ {self.node_name} Notification server on port {self.notification_port}")
+
+    def _wait_for_round_command(self, round_num: int):
+        """
+        NOTIFY를 round 시작의 주 경로로 사용함.
+        NOTIFY timeout이 발생한 경우에만 cnt-fl-control/la를 확인함.
+        """
+        while True:
+            with self.job_lock:
+                command = self.latest_job_command
+
+            if command:
+                state = str(command.get("jobState", ""))
+
+                try:
+                    current_round = int(
+                        command.get("currentRound", 0)
+                    )
+                except (TypeError, ValueError):
+                    current_round = 0
+
+                if state == "FL_COMPLETED":
+                    return command
+
+                if (
+                    state == "FL_TRAINING"
+                    and current_round == round_num
+                ):
+                    return command
+
+            notified = self.job_event.wait(
+                timeout=self.command_wait_timeout_sec
+            )
+            self.job_event.clear()
+
+            if notified:
+                continue
+
+            print(
+                f"  ⚠ {self.node_name}: command NOTIFY timeout; "
+                f"check cnt-fl-control/la once"
+            )
+
+            fallback = self._get_current_job_state()
+            if not fallback:
+                continue
+
+            state = str(fallback.get("jobState", ""))
+
+            try:
+                current_round = int(
+                    fallback.get("currentRound", 0)
+                )
+            except (TypeError, ValueError):
+                current_round = 0
+
+            if (
+                state == "FL_COMPLETED"
+                or (
+                    state == "FL_TRAINING"
+                    and current_round == round_num
+                )
+            ):
+                with self.job_lock:
+                    self.latest_job_command = fallback
+
+                return fallback
 
     # ---------------------------
     # oneM2M ops
@@ -307,16 +446,38 @@ class MNAETrainer:
         except Exception:
             return None
 
-    def _write_cache_meta(self, cached_round: int, local_path: str, src_uri: str):
-        payload = self._write_local_cache_meta(cached_round, local_path, src_uri)
+    def _write_cache_meta(
+        self,
+        cached_round: int,
+        local_path: str,
+        src_uri: str
+    ):
+        payload = self._write_local_cache_meta(
+            cached_round,
+            local_path,
+            src_uri
+        )
+
         if not payload:
             return None
-        labels = [self.node_name, f"round_{cached_round}", "type:global-cache"]
-        r = om2m.create_content_instance(self.local_model_path, payload, labels=labels)
-        if r:
-            print(f"    ✓ cached meta -> {self.local_model_path} (round {cached_round})")
+
+        payload["type"] = "global-cache"
+
+        result = om2m.create_content_instance(
+            self.local_model_path,
+            payload
+        )
+
+        if result:
+            print(
+                f"    ✓ cached meta -> {self.local_model_path} "
+                f"(round {cached_round})"
+            )
         else:
-            print(f"    ⚠ cache meta mirror failed (local OK, round {cached_round})")
+            print(
+                f"    ⚠ cache meta mirror failed "
+                f"(local OK, round {cached_round})"
+            )
         return payload
 
     def _try_load_global_from_cache(self, expected_round: int):
@@ -342,73 +503,131 @@ class MNAETrainer:
                 return None
         return path
 
-    def _get_global_model_path_for_expected_round(self, expected_round: int):
-        cin = om2m.get_latest_content_instance(self.global_model_path)
+    def _get_global_model_path_for_expected_round(
+        self,
+        expected_round: int,
+        global_model_uri: str | None = None
+    ):
+        if global_model_uri:
+            resource_path = str(global_model_uri)
+
+            if resource_path.startswith(config.BASE_URL):
+                resource_path = resource_path[len(config.BASE_URL):]
+
+            resource_path = resource_path.lstrip("/")
+            cin = om2m.get_resource(resource_path)
+
+        else:
+            cin = om2m.get_latest_content_instance(
+                self.global_model_path
+            )
+
         if not cin or "m2m:cin" not in cin:
             return None
-        con        = cin["m2m:cin"]["con"]
-        model_data = json.loads(con) if isinstance(con, str) else con
-        if int(model_data.get("global_round", 0)) != expected_round:
+
+        con = cin["m2m:cin"].get("con")
+
+        try:
+            model_data = (
+                json.loads(con)
+                if isinstance(con, str)
+                else con
+            )
+        except (TypeError, json.JSONDecodeError):
             return None
+
+        if not isinstance(model_data, dict):
+            return None
+
+        try:
+            global_round = int(
+                model_data.get("global_round", -1)
+            )
+        except (TypeError, ValueError):
+            return None
+
+        if global_round != expected_round:
+            return None
+
         return model_data.get("model_path")
 
-    def _pull_and_cache_global_model(self, expected_round: int):
-        src_path = self._get_global_model_path_for_expected_round(expected_round)
+    def _pull_and_cache_global_model(
+        self,
+        expected_round: int,
+        global_model_uri: str | None = None
+    ):
+        src_path = self._get_global_model_path_for_expected_round(
+            expected_round,
+            global_model_uri=global_model_uri
+        )
+
         if not src_path or not os.path.exists(src_path):
             return None
+
         dst_path = os.path.join(
-            self.edge_cache_dir, f"global_round{expected_round}.pt"
+            self.edge_cache_dir,
+            f"global_round{expected_round}.pt"
         )
+
         try:
             shutil.copyfile(src_path, dst_path)
         except Exception as e:
             print(f"    ⚠ copy failed: {e}")
             return None
+
         self._write_cache_meta(
             cached_round=expected_round,
             local_path=dst_path,
-            src_uri=f"{self.global_model_path}/la",
+            src_uri=(
+                global_model_uri
+                or f"{self.global_model_path}/la"
+            ),
         )
+
         return dst_path
 
     # ---------------------------
     # Drop-box upload
     # ---------------------------
     def _upload_to_dropbox(
-        self, round_num, train_loss, val_loss, val_auroc, num_samples, model_path
+        self,
+        round_num,
+        train_loss,
+        val_loss,
+        val_auroc,
+        num_samples,
+        model_path
     ):
         payload = {
-            "node":        self.node_name,
-            "round":       round_num,
-            "model_path":  model_path,
-            "train_loss":  train_loss,
-            "val_loss":    val_loss,
-            "val_auroc":   val_auroc,   # AUROC (이전 val_acc 대체)
+            "type": "fl-update",
+            "node": self.node_name,
+            "round": round_num,
+
+            # 실제 PyTorch 가중치는 .pt 파일에 저장됨
+            # con에는 해당 파일 경로를 전달
+            "model_path": model_path,
+            "weights_uri": model_path,
+
+            "accuracy": val_auroc,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_auroc": val_auroc,
             "num_samples": num_samples,
-            "timestamp":   time.time(),
+            "timestamp": time.time(),
         }
-        labels = [self.node_name, f"round_{round_num}", "type:fl-update"]
-        r = om2m.create_content_instance(self.dropbox_cnt_path, payload, labels=labels)
-        if r:
-            print(f"  ✓ uploaded -> {self.dropbox_cnt_path} (round {round_num})")
-        return r
 
-    def _parse_cin_con_from_notification(self, sgn: dict):
-        nev = sgn.get("nev", {})
-        rep = nev.get("rep", {})
+        result = om2m.create_content_instance(
+            self.dropbox_cnt_path,
+            payload
+        )
 
-        cin = rep.get("m2m:cin")
-        if not cin:
-            return None
+        if result:
+            print(
+                f"  ✓ uploaded -> {self.dropbox_cnt_path} "
+                f"(round {round_num})"
+            )
 
-        con = cin.get("con")
-        if con is None:
-            return None
-
-        try:
-            return json.loads(con) if isinstance(con, str) else con
-        except Exception:
-            return None
+        return result
 
     # ---------------------------
     # Main loop
@@ -433,20 +652,18 @@ class MNAETrainer:
             print(f"[{self.node_name}] wait Round {round_num}")
             print("─" * 50)
 
-            while True:
-                job_state = self._get_current_job_state()
-                if job_state is None:
-                    time.sleep(2)
-                    continue
-                state         = job_state.get("jobState", "")
-                current_round = int(job_state.get("currentRound", 0))
-                if state == "FL_COMPLETED":
-                    print(f"  ✓ {self.node_name} done: FL_COMPLETED")
-                    return
-                if state == "FL_TRAINING" and current_round == round_num:
-                    print(f"  ✓ Round {round_num} start! (jobState={state})")
-                    break
-                time.sleep(2)
+            job_state = self._wait_for_round_command(round_num)
+
+            state = str(job_state.get("jobState", ""))
+
+            if state == "FL_COMPLETED":
+                print(f"  ✓ {self.node_name} done: FL_COMPLETED")
+                return
+
+            print(
+                f"  ✓ Round {round_num} start by NOTIFY "
+                f"(jobState={state})"
+            )
 
             if self.round_start_stagger_sec > 0:
                 time.sleep(self.round_start_stagger_sec)
@@ -463,21 +680,51 @@ class MNAETrainer:
                 continue
 
             # ── 이전 글로벌 모델 로드 (round > 1) ──
-            if round_num > 1:
-                expected = round_num - 1
-                cached   = self._try_load_global_from_cache(expected)
-                if cached:
-                    sd = torch.load(cached, map_location="cpu")
-                    self.edge_node.set_state_dict(sd)
-                    print(f"    ✓ global model from EDGE cache (round {expected})")
-                else:
-                    pulled = self._pull_and_cache_global_model(expected)
-                    if pulled:
-                        sd = torch.load(pulled, map_location="cpu")
-                        self.edge_node.set_state_dict(sd)
-                        print(f"    ✓ global model from IN-AE (round {expected})")
-                    else:
-                        print("    ⚠ global model not available (skip load)")
+            # round command 안의 globalModelUri를 이용하여
+            # 글로벌 모델을 조회하고 로컬 캐시에 저장
+            expected_round = round_num - 1
+            global_model_uri = job_state.get("globalModelUri")
+
+            cached_path = self._try_load_global_from_cache(
+                expected_round
+            )
+
+            if cached_path:
+                state_dict = torch.load(
+                    cached_path,
+                    map_location="cpu"
+                )
+                self.edge_node.set_state_dict(state_dict)
+
+                print(
+                    f"    ✓ global model from EDGE cache "
+                    f"(round {expected_round})"
+                )
+
+            else:
+                pulled_path = self._pull_and_cache_global_model(
+                    expected_round,
+                    global_model_uri=global_model_uri,
+                )
+
+                if not pulled_path:
+                    print(
+                        f"  ✗ global model unavailable "
+                        f"for round {expected_round}; "
+                        "stop MN-AE"
+                    )
+                    return
+
+                state_dict = torch.load(
+                    pulled_path,
+                    map_location="cpu"
+                )
+                self.edge_node.set_state_dict(state_dict)
+
+                print(
+                    f"    ✓ global model from IN-AE "
+                    f"(round {expected_round})"
+                )
 
             # ── DP 설정 ──
             security_mode  = job_state.get("securityMode", "DP")

@@ -52,6 +52,10 @@ class INAECoordinator:
         self.collection_lock = threading.Lock()
         self.collection_event = threading.Event()
 
+        self.collection_timeout_sec = float(
+            os.getenv("FL_COLLECTION_NOTIFY_TIMEOUT", "600")
+        )
+
         # -----------------------
         # 추가: 글로벌 모델/평가 경로
         # -----------------------
@@ -72,6 +76,75 @@ class INAECoordinator:
             PROJECT_ROOT / "archive" / "experiments" / "evaluate_mn1_hidden_test.py"
         )
 
+    @staticmethod
+    def _decode_cin_content(cin_obj):
+        if not isinstance(cin_obj, dict):
+            return None
+
+        cin = cin_obj.get("m2m:cin", cin_obj)
+
+        if not isinstance(cin, dict):
+            return None
+
+        con = cin.get("con")
+        if con is None:
+            return None
+
+        try:
+            data = (
+                json.loads(con)
+                if isinstance(con, str)
+                else con
+            )
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _map_notified_node(
+        self,
+        sur: str,
+        result_data: dict | None
+    ):
+        node_from_sur = None
+
+        for node, cnt_path in self.dropbox_by_node.items():
+            if cnt_path in sur or f"cnt-{node}" in sur:
+                node_from_sur = node
+                break
+
+        node_from_con = None
+
+        if result_data:
+            raw_node = str(
+                result_data.get("node", "")
+            ).strip().lower()
+            aliases = {
+                f"mn-ae-{i}": f"mn{i}"
+                for i in range(
+                    1,
+                    self.expected_nodes + 1
+                )
+            }
+            node_from_con = aliases.get(
+                raw_node,
+                raw_node
+            )
+            if node_from_con not in self.dropbox_by_node:
+                node_from_con = None
+
+        if (
+            node_from_sur
+            and node_from_con
+            and node_from_sur != node_from_con
+        ):
+            print(
+                f"  ⚠ notification node mismatch: "
+                f"sur={node_from_sur}, "
+                f"con={node_from_con}"
+            )
+            return None
+        return node_from_con or node_from_sur
+
     # -----------------------
     # Flask notify handler
     # -----------------------
@@ -82,60 +155,127 @@ class INAECoordinator:
                 body = request.get_json(silent=True) or {}
                 sgn = body.get("m2m:sgn", {})
 
+                # Subscription verification
                 if sgn.get("vrq") is True:
-                    print("  [VERIFY] IN-AE subscription verification OK")
+                    print(
+                        "  [VERIFY] IN-AE "
+                        "subscription verification OK"
+                    )
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
 
-                nev = sgn.get("nev", {})
-                sur = sgn.get("sur", "")
+                nev = sgn.get("nev", {}) or {}
+                sur = str(sgn.get("sur", ""))
                 net = nev.get("net", 0)
+                net_values = (
+                    net if isinstance(net, list)
+                    else [net]
+                )
+
+                try:
+                    is_cin_created = 3 in {
+                        int(value) for value in net_values
+                    }
+                except (TypeError, ValueError):
+                    is_cin_created = False
 
                 print(f"\n  [NOTIFY] sur={sur}, net={net}")
 
-                if net != 3:
+                if not is_cin_created:
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
 
-                fired_node = None
-                for node, cnt_path in self.dropbox_by_node.items():
-                    if cnt_path in sur:
-                        fired_node = node
-                        break
+                # 정상 수집 경로:
+                # NOTIFY body의 rep.m2m:cin.con을 직접 사용
+                rep = nev.get("rep", {}) or {}
+                result_data = self._decode_cin_content(rep)
+                fired_node = self._map_notified_node(
+                    sur,
+                    result_data
+                )
 
                 if not fired_node:
-                    print("  ⚠ cannot map sur -> node (ignore)")
+                    print(
+                        "  ⚠ cannot map notification "
+                        "to an expected node"
+                    )
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
 
-                round_label = f"round_{self.current_round}"
-                cin_obj = om2m.retrieve_first_cin_by_label(self.dropbox_by_node[fired_node], round_label)
+                # TinyIoT가 rep를 생략한 경우에만
+                # 해당 컨테이너의 최신 CIN을 한 번 조회
+                if result_data is None:
+                    cin_obj = om2m.get_latest_content_instance(
+                        self.dropbox_by_node[fired_node]
+                    )
+                    result_data = self._decode_cin_content(
+                        cin_obj
+                    )
 
-                if not cin_obj or "m2m:cin" not in cin_obj:
-                    print(f"  ⚠ {fired_node}: CIN not found by label={round_label}")
+                if not result_data:
+                    print(
+                        f"  ⚠ {fired_node}: "
+                        f"local update con is missing"
+                    )
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
 
-                con = cin_obj["m2m:cin"].get("con")
-                result_data = json.loads(con) if isinstance(con, str) else con
+                update_type = (
+                    str(result_data.get("type", ""))
+                    .lower()
+                    .replace("_", "-")
+                )
 
-                cin_round = result_data.get("round")
+                if update_type != "fl-update":
+                    print(
+                        f"  ⚠ {fired_node}: "
+                        f"unexpected type={update_type!r}"
+                    )
+                    resp = make_response("", 200)
+                    resp.headers["X-M2M-RSC"] = "2000"
+                    return resp
+
+                try:
+                    cin_round = int(
+                        result_data.get("round", -1)
+                    )
+                except (TypeError, ValueError):
+                    cin_round = -1
+
                 if cin_round != self.current_round:
-                    print(f"  ⚠ {fired_node}: round mismatch (cin={cin_round}, expected={self.current_round})")
+                    print(
+                        f"  ⚠ {fired_node}: "
+                        f"round mismatch "
+                        f"(cin={cin_round}, "
+                        f"expected={self.current_round})"
+                    )
                     resp = make_response("", 200)
                     resp.headers["X-M2M-RSC"] = "2000"
                     return resp
 
                 with self.collection_lock:
-                    self.collected_results[fired_node] = result_data
-                    print(f"  [COLLECT] {fired_node} Round {cin_round} ({len(self.collected_results)}/{self.expected_nodes})")
+                    self.collected_results[
+                        fired_node
+                    ] = result_data
+                    collected = len(
+                        self.collected_results
+                    )
 
-                    if len(self.collected_results) >= self.expected_nodes:
-                        print("  ✓ all nodes collected -> set event")
+                    print(
+                        f"  [COLLECT/NOTIFY] "
+                        f"{fired_node} Round {cin_round} "
+                        f"({collected}/{self.expected_nodes})"
+                    )
+
+                    if collected >= self.expected_nodes:
+                        print(
+                            "  ✓ all nodes collected "
+                            "by notification -> set event"
+                        )
                         self.collection_event.set()
 
                 resp = make_response("", 200)
@@ -291,25 +431,41 @@ class INAECoordinator:
     # -----------------------
     # FL publish
     # -----------------------
-    def _publish_job_state(self, state: str, round_num: int):
+    def _publish_job_state(
+        self,
+        state: str,
+        round_num: int
+    ):
         data = {
-            "type": "FL_COMMAND",
+            "type": "fl-command",
             "jobState": state,
             "currentRound": round_num,
             "maxRounds": self.max_rounds,
-            "globalModelUri": f"{self.global_model_path}/la",
+            "globalModelUri": (
+                f"{self.global_model_path}/la"
+            ),
             "securityMode": "DP",
             "privacyParams": {
                 "epsilon": config.DP_EPSILON,
                 "delta": config.DP_DELTA,
-                "max_grad_norm": config.DP_MAX_GRAD_NORM,
+                "max_grad_norm": (
+                    config.DP_MAX_GRAD_NORM
+                ),
             },
             "timestamp": time.time(),
         }
-        r = om2m.create_content_instance(self.fl_control_path, data, labels=[f"round_{round_num}", state])
-        if r:
-            print(f"  ✓ jobState: {state} (Round {round_num})")
-        return r
+        result = om2m.create_content_instance(
+            self.fl_control_path,
+            data
+        )
+
+        if result:
+            print(
+                f"  ✓ jobState: {state} "
+                f"(Round {round_num})"
+            )
+
+        return result
 
     def _ensure_initial_global_model(self):
         """
@@ -326,9 +482,18 @@ class INAECoordinator:
             self.latest_global_model_path = model_path
             return model_path
 
-        input_size = getattr(config, "seq_len", 2560)
+        ae_cfg = getattr(
+            config,
+            "AE_CFG",
+            config.AEConfig()
+        )
 
-        model = Conv1DAE(input_size)
+        model = Conv1DAE(
+            n_channels=ae_cfg.n_channels,
+            latent_dim=ae_cfg.latent_dim,
+            seq_len=ae_cfg.seq_len,
+        )
+
         torch.save(model.state_dict(), model_path)
 
         self.latest_global_model_path = model_path
@@ -336,31 +501,106 @@ class INAECoordinator:
         return model_path
 
     def _publish_global_model(self, round_num: int):
-        model_path = f"{self.global_model_dir}/global_round{round_num}.pt"
+        model_path = (
+            f"{self.global_model_dir}/"
+            f"global_round{round_num}.pt"
+        )
         data = {
+            "type": "global-model",
             "global_round": round_num,
             "model_path": model_path,
             "model_ready": True,
             "timestamp": time.time(),
         }
-        r = om2m.create_content_instance(self.global_model_path, data, labels=[f"round_{round_num}"])
-        if r:
-            print(f"  ✓ Global model published Round {round_num}")
-        return r
+        result = om2m.create_content_instance(
+            self.global_model_path,
+            data
+        )
 
-    def _collect_results_polling(self, round_num: int) -> dict:
-        print(f"\n  Round {round_num} collect results (Polling fallback)...")
+        if result:
+            print(
+                f"  ✓ Global model published "
+                f"Round {round_num}"
+            )
+
+        return result
+
+    # -----------------------
+    #def _collect_results_polling(self, round_num: int) -> dict:
+    #    print(f"\n  Round {round_num} collect results (Polling fallback)...")
+    #    results = {}
+    #    round_label = f"round_{round_num}"
+
+    #    for node, cnt_path in self.dropbox_by_node.items():
+    #        cin_obj = om2m.retrieve_first_cin_by_label(cnt_path, round_label)
+    #        if cin_obj and "m2m:cin" in cin_obj:
+    #            con = cin_obj["m2m:cin"]["con"]
+    #            data = json.loads(con) if isinstance(con, str) else con
+    #            if data.get("round") == round_num:
+    #                results[node] = data
+    #                print(f"    ✓ {node}: train={data['train_loss']:.4f}, n={data['num_samples']}")
+    #    return results
+    # -----------------------
+
+    def _collect_results_latest(
+        self,
+        round_num: int,
+        nodes=None
+    ) -> dict:
+        """
+        NOTIFY 누락 복구용 단발성 조회.
+        반복 polling에는 사용하지 않음.
+        """
+        target_nodes = (
+            list(nodes)
+            if nodes is not None
+            else self.node_names
+        )
+
         results = {}
-        round_label = f"round_{round_num}"
 
-        for node, cnt_path in self.dropbox_by_node.items():
-            cin_obj = om2m.retrieve_first_cin_by_label(cnt_path, round_label)
-            if cin_obj and "m2m:cin" in cin_obj:
-                con = cin_obj["m2m:cin"]["con"]
-                data = json.loads(con) if isinstance(con, str) else con
-                if data.get("round") == round_num:
-                    results[node] = data
-                    print(f"    ✓ {node}: train={data['train_loss']:.4f}, n={data['num_samples']}")
+        for node in target_nodes:
+            cnt_path = self.dropbox_by_node[node]
+
+            cin_obj = om2m.get_latest_content_instance(
+                cnt_path
+            )
+
+            data = self._decode_cin_content(cin_obj)
+
+            if not data:
+                continue
+
+            update_type = (
+                str(data.get("type", ""))
+                .lower()
+                .replace("_", "-")
+            )
+
+            try:
+                update_round = int(
+                    data.get("round", -1)
+                )
+            except (TypeError, ValueError):
+                update_round = -1
+
+            payload_node = str(
+                data.get("node", "")
+            ).lower()
+
+            if (
+                update_type == "fl-update"
+                and update_round == round_num
+                and payload_node == node
+            ):
+                results[node] = data
+
+                print(
+                    f"    ✓ fallback {node}: "
+                    f"train={data['train_loss']:.4f}, "
+                    f"n={data['num_samples']}"
+                )
+
         return results
 
     # -----------------------
@@ -529,32 +769,79 @@ class INAECoordinator:
             print(f"GLOBAL ROUND {r}/{self.max_rounds}")
             print("=" * 60)
 
+            # 이번 라운드의 알림 수집 상태 초기화
             self.collection_event.clear()
+
             with self.collection_lock:
                 self.collected_results = {}
 
+            # 이 CIN 생성으로 MN-AE에 NOTIFY가 전달됨
             self._publish_job_state("FL_TRAINING", r)
 
-            print("  ⏳ Wait local updates (timeout: 600s)...")
-            results = {}
-            start_time = time.time()
+            print(
+                f"  ⏳ Wait local-update NOTIFY "
+                f"(timeout: {self.collection_timeout_sec:.0f}s)..."
+            )
 
-            while time.time() - start_time < 600:
-                results = self._collect_results_polling(r)
+            all_notified = self.collection_event.wait(
+                timeout=self.collection_timeout_sec
+            )
 
-                if len(results) >= self.expected_nodes:
-                    print("  ✓ All results received by polling -> aggregate now")
-                    break
+            with self.collection_lock:
+                results = dict(self.collected_results)
 
-                print(f"  ... collected {len(results)}/{self.expected_nodes}, retry in 2s")
-                time.sleep(2)
+            if all_notified:
+                print(
+                    "  ✓ All results received by NOTIFY "
+                    "-> aggregate now"
+                )
 
+            else:
+                missing_nodes = [
+                    node
+                    for node in self.node_names
+                    if node not in results
+                ]
+
+                print(
+                    f"  ⚠ NOTIFY timeout: collected "
+                    f"{len(results)}/{self.expected_nodes}; "
+                    f"single fallback RETRIEVE for {missing_nodes}"
+                )
+
+                fallback_results = self._collect_results_latest(
+                    r,
+                    nodes=missing_nodes
+                )
+
+                results.update(fallback_results)
+
+            # timeout 복구 후에도 부족하면 다음 라운드로 넘어가지 않음
             if len(results) < self.expected_nodes:
-                print(f"  ✗ Not enough results ({len(results)}/{self.expected_nodes}), skip round")
-                continue
+                print(
+                    f"  ✗ Not enough results "
+                    f"({len(results)}/{self.expected_nodes}); "
+                    "abort FL"
+                )
+                return
 
-            self._publish_job_state("FL_AGGREGATING", r)
-            _, final_path = self._aggregate(results, r)
+            self._publish_job_state(
+                "FL_AGGREGATING",
+                r
+            )
+
+            _, final_path = self._aggregate(
+                results,
+                r
+            )
+
+            if not final_path or not os.path.exists(final_path):
+                print(
+                    f"  ✗ Aggregation failed in round {r}; "
+                    "do not publish global model"
+                )
+                return
+
             self._publish_global_model(r)
 
         print("\nFederated learning completed!")
