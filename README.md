@@ -1,328 +1,297 @@
-# FL: oneM2M Resource-based Federated Learning Prototype
+# FL: Notification-Driven oneM2M Federated Learning Prototype
 
 ## 1. Overview
 
-This repository contains a prototype implementation of a federated learning workflow using oneM2M resources.
+This repository implements a oneM2M resource-based federated learning workflow for bearing fault detection using the FEMTO-ST PRONOSTIA dataset.
 
-The project is aligned with the ongoing oneM2M work on **TR-0084: Developer guide; Use of oneM2M resources to support Federated Learning**.
+The implementation follows the direction of **oneM2M TR-0084: Developer guide; Use of oneM2M resources to support Federated Learning**. Standard oneM2M resources such as `<AE>`, `<container>`, `<contentInstance>`, `<subscription>`, and ACP-linked resources are used to coordinate the complete FL lifecycle.
 
-The goal of this prototype is to show how native oneM2M resources such as **Application Entity (AE)**, **`<container>`**, **`<contentInstance>`**, and **`<subscription>`** can be used to support a complete federated learning lifecycle.
+The current prototype provides:
 
-Instead of relying on a separate machine learning middleware for coordination, this prototype uses oneM2M-style resource operations to manage:
-
-```text
-- federated learning round control
+- notification-driven FL round control
 - global model metadata distribution
-- local training result upload
-- local update collection
-- global aggregation
+- local training at three MN-AEs
+- per-node local update upload
+- subscription-based local update collection
+- FedAvg aggregation
+- loss Z-score-based anomalous update filtering
+- ACP-based access control verification
 - dashboard visualization
-- subscription notification-based update detection
-```
+- final cold-start evaluation
 
-The current implementation uses **TinyIoT** as the oneM2M CSE layer.
-
----
-
-## 2. Related oneM2M Work Item
-
-### Main Reference
-
-| Item               | Description                                                                     |
-| ------------------ | ------------------------------------------------------------------------------- |
-| **oneM2M TR-0084** | Developer guide; Use of oneM2M resources to support Federated Learning          |
-| **Contribution**   | TDE-2026-0022 Federated Learning Resources and Procedures                       |
-| **Purpose**        | Define how oneM2M resources can be used to support federated learning workflows |
-
-This repository is a prototype implementation related to the TR-0084 direction.
-
-The prototype focuses on mapping the federated learning lifecycle onto oneM2M resource operations and resource structures.
+The current implementation runs on a **single TinyIoT CSE**. `IN-AE` acts as the coordinator, while `MN-AE-1`, `MN-AE-2`, and `MN-AE-3` act as local training clients.
 
 ---
 
-## 3. Concept
-
-Federated learning allows multiple distributed nodes to train models locally without sending raw data to a central server.
-
-In this prototype:
+## 2. System Architecture
 
 ```text
-- IN-AE acts as the global FL coordinator and aggregator.
-- MN-AEs act as local training clients.
-- TinyIoT CSE stores oneM2M resources and metadata.
-- Raw local data stays at each MN-AE side.
-- Only local update metadata and model artifact paths are exchanged.
+TinyIoT CSE (http://127.0.0.1:3000)
+├── IN-AE
+│   ├── cnt-fl-control
+│   │   ├── FL state and round command CINs
+│   │   ├── sub_mn1
+│   │   ├── sub_mn2
+│   │   └── sub_mn3
+│   │
+│   ├── cnt-global-model
+│   │   └── Global model metadata CINs
+│   │
+│   └── cnt-local-updates
+│       ├── cnt-mn1
+│       │   └── sub_in_dropbox_mn1
+│       ├── cnt-mn2
+│       │   └── sub_in_dropbox_mn2
+│       └── cnt-mn3
+│           └── sub_in_dropbox_mn3
+│
+├── MN-AE-1
+│   ├── cnt-sensor-data
+│   └── cnt-local-model
+│
+├── MN-AE-2
+│   ├── cnt-sensor-data
+│   └── cnt-local-model
+│
+└── MN-AE-3
+    ├── cnt-sensor-data
+    └── cnt-local-model
 ```
 
-The basic FL lifecycle is:
+### Entity Roles
 
-```text
-1. IN-AE initializes the global model.
-2. IN-AE publishes global model metadata to a oneM2M resource.
-3. Each MN-AE retrieves the global model metadata.
-4. Each MN-AE performs local training.
-5. Each MN-AE uploads local update metadata.
-6. IN-AE collects local updates.
-7. IN-AE aggregates local updates into a new global model.
-8. IN-AE publishes the updated global model.
-9. The next FL round starts.
-```
+| Entity | Role |
+| --- | --- |
+| `IN-AE` | Starts FL rounds, publishes commands, receives local update notifications, validates updates, and performs aggregation |
+| `MN-AE-1` | Trains on Condition 1 bearing data and uploads a local update |
+| `MN-AE-2` | Trains on Condition 2 bearing data and uploads a local update |
+| `MN-AE-3` | Trains on Condition 3 bearing data and uploads a local update |
+| `TinyIoT CSE` | Stores oneM2M resources and delivers subscription notifications |
+| Dashboard | Retrieves current resource state for visualization only |
+
+The sequence diagrams use one logical **MN-side** participant to represent the repeated `MN-CSE + MN-AE[i]` behavior. The same sequence is executed for `i = 1..3`.
 
 ---
 
-## 4. oneM2M Resource Mapping
+## 3. oneM2M Resource Mapping
 
-The prototype uses the following oneM2M-style resource structure.
+| FL Function | oneM2M Resource | Stored Content |
+| --- | --- | --- |
+| Round control | `IN-AE/cnt-fl-control` | `jobState`, `currentRound`, `maxRounds`, `globalModelUri`, privacy configuration |
+| Global model registry | `IN-AE/cnt-global-model` | global round, model path, model-ready state |
+| Local update drop-box | `IN-AE/cnt-local-updates/cnt-mnX` | node, round, model path, losses, AUROC, sample count |
+| Local sensor metadata | `MN-AE-X/cnt-sensor-data` | local FEMTO data path and metadata |
+| Edge model cache | `MN-AE-X/cnt-local-model` | cached global model metadata |
+| Round command delivery | `<subscription>` under `cnt-fl-control` | notification target for each MN-AE |
+| Local update delivery | `<subscription>` under each `cnt-mnX` | notification target for IN-AE |
+| Access control | ACP + `acpi` | resource access permissions for IN-AE and each MN-AE |
 
-```text
-TinyIoT
-└── IN-AE
-    ├── cnt-fl-control
-    │   └── FL command and round state metadata
-    │
-    ├── cnt-global-model
-    │   └── Global model metadata
-    │
-    └── cnt-local-updates
-        ├── cnt-mn1
-        │   └── Local update metadata from MN-AE-1
-        ├── cnt-mn2
-        │   └── Local update metadata from MN-AE-2
-        └── cnt-mn3
-            └── Local update metadata from MN-AE-3
-```
+### TinyIoT Label Compatibility
 
-### Resource Roles
+The label-based filtering fields used in the initial design were removed because the current TinyIoT implementation does not provide the required label-based FL retrieval path. Instead, `type`, `round`, and `node` are stored and validated inside `contentInstance.con`.
 
-| Resource                        | Role                                                             |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `IN-AE`                         | Application Entity for FL coordination                           |
-| `cnt-fl-control`                | Stores FL round state and control messages                       |
-| `cnt-global-model`              | Stores global model metadata                                     |
-| `cnt-local-updates`             | Parent container for local update results                        |
-| `cnt-mn1`, `cnt-mn2`, `cnt-mn3` | Per-node local update containers                                 |
-| `contentInstance`               | Stores model metadata, local update metadata, and training state |
+For TinyIoT compatibility, dictionary content is serialized as a JSON string before being stored in `contentInstance.con`.
 
 ---
 
-## 5. FL Entity Mapping
+## 4. Notification-Driven FL Flow
 
-| FL Concept                    | oneM2M Mapping                                        | Implementation               |
-| ----------------------------- | ----------------------------------------------------- | ---------------------------- |
-| FL Server / Aggregator        | IN-AE                                                 | `fl/in_ae_standard.py`       |
-| FL Client                     | MN-AE                                                 | `fl/mn_ae_standard.py`       |
-| Global model metadata         | `<contentInstance>` under `cnt-global-model`          | JSON metadata                |
-| Local update metadata         | `<contentInstance>` under `cnt-local-updates/cnt-mnX` | JSON metadata                |
-| Round state                   | `<contentInstance>` under `cnt-fl-control`            | FL status message            |
-| Event-driven update detection | `<subscription>` + notification                       | Planned / partially verified |
+The main FL workflow does **not** continuously poll for round commands or local updates.
 
----
+- Round commands are delivered from TinyIoT to each MN-AE through `<subscription>` notifications.
+- Local update arrivals are delivered from TinyIoT to IN-AE through `<subscription>` notifications.
+- If a notification is missing, the receiver performs a **single latest-CIN RETRIEVE** as a recovery path.
+- The dashboard uses periodic GET requests only to visualize the current state. Dashboard polling does not control FL execution.
 
-## 6. Current Implementation Status
-
-Implemented:
+### Command Subscriptions
 
 ```text
-- oneM2M resource setup for FL
-- IN-AE global model initialization
-- global model metadata publishing
-- MN-AE local training
-- local update metadata upload
-- IN-AE local update collection
-- FedAvg-style aggregation
-- dashboard visualization
-- TinyIoT subscription notification path verification
+TinyIoT/IN-AE/cnt-fl-control/sub_mn1
+  nu = http://127.0.0.1:5001/notify
+
+TinyIoT/IN-AE/cnt-fl-control/sub_mn2
+  nu = http://127.0.0.1:5002/notify
+
+TinyIoT/IN-AE/cnt-fl-control/sub_mn3
+  nu = http://127.0.0.1:5003/notify
 ```
 
-Current focus:
-
-```text
-- Replace or supplement polling-based local update collection with oneM2M subscription notification.
-```
-
----
-
-## 7. Subscription Notification Support
-
-TR-0084 focuses on using oneM2M resources to support federated learning procedures.
-For FL update collection, subscription notification is useful because IN-AE does not need to continuously poll local update containers.
-
-The intended notification-based flow is:
-
-```text
-1. IN-AE creates subscriptions under local update containers.
-2. Each subscription uses enc.net = [3].
-3. MN-AE uploads a local update as a contentInstance.
-4. TinyIoT detects the contentInstance creation event.
-5. TinyIoT sends a notification to IN-AE.
-6. IN-AE parses the notification and stores the local update by round and node.
-7. When all expected local updates arrive, IN-AE performs aggregation.
-```
-
-Target subscription locations:
-
-```text
-TinyIoT/IN-AE/cnt-local-updates/cnt-mn1
-TinyIoT/IN-AE/cnt-local-updates/cnt-mn2
-TinyIoT/IN-AE/cnt-local-updates/cnt-mn3
-```
-
-Example subscription:
+Each subscription uses:
 
 ```json
 {
-  "m2m:sub": {
-    "rn": "sub-fl-mn1",
-    "nu": ["http://127.0.0.1:9100/fl/notify"],
-    "enc": {
-      "net": [3]
-    }
+  "enc": {
+    "net": [3]
   }
 }
 ```
 
-Here, `enc.net = [3]` means that a notification is triggered when a direct child resource is created under the subscribed resource. In this prototype, that direct child resource is a local update `contentInstance`.
+`net = 3` triggers a notification when a direct child resource, such as a new `<contentInstance>`, is created.
 
----
-
-## 8. TinyIoT Notification Verification
-
-Before applying notification to the FL workflow, TinyIoT subscription notification behavior was tested separately.
-
-### Test Receiver
+### Local Update Subscriptions
 
 ```text
-http://127.0.0.1:9000/notify
+TinyIoT/IN-AE/cnt-local-updates/cnt-mn1/sub_in_dropbox_mn1
+TinyIoT/IN-AE/cnt-local-updates/cnt-mn2/sub_in_dropbox_mn2
+TinyIoT/IN-AE/cnt-local-updates/cnt-mn3/sub_in_dropbox_mn3
 ```
 
-### Test Subscription
-
-```json
-{
-  "m2m:sub": {
-    "rn": "sub-check-001",
-    "nu": ["http://127.0.0.1:9000/notify"],
-    "enc": {
-      "net": [3]
-    }
-  }
-}
-```
-
-### Verification Request
-
-When a subscription is created, TinyIoT sends a verification request to confirm that the notification URI is reachable.
-
-Expected receiver output:
+All three notify:
 
 ```text
-path: /notify
->>> SUBSCRIPTION VERIFICATION REQUEST
-```
-
-Expected body:
-
-```json
-{
-  "m2m:sgn": {
-    "vrq": true
-  }
-}
-```
-
-### Normal Notification
-
-After the subscription is created, a normal notification is sent when a `contentInstance` is created under the subscribed container.
-
-Test contentInstance:
-
-```json
-{
-  "m2m:cin": {
-    "con": "hello fixed notification"
-  }
-}
-```
-
-Expected receiver output:
-
-```text
-path: /notify
->>> NORMAL NOTIFICATION
-```
-
-Expected body contains:
-
-```json
-{
-  "m2m:sgn": {
-    "nev": {
-      "net": 3,
-      "rep": {
-        "m2m:cin": {
-          "con": "hello fixed notification"
-        }
-      }
-    }
-  }
-}
+http://127.0.0.1:6000/notify
 ```
 
 ---
 
-## 9. TinyIoT Notification Path Fix
+## 5. Final Sequence
 
-During testing, TinyIoT initially sent the subscription verification request to the wrong HTTP path.
+### A. Initial Resource and Subscription Setup
 
-Expected path:
+1. Create IN-AE and MN-AE resources.
+2. Create ACP resources and connect them using `acpi`.
+3. Create `cnt-fl-control`, `cnt-global-model`, and node-specific local update containers.
+4. Create `cnt-sensor-data` and `cnt-local-model` for each MN-AE.
+5. Start the MN-AE notification servers.
+6. Each MN-AE subscribes to `cnt-fl-control`.
+7. IN-AE starts its notification server and subscribes to each `cnt-mnX` container.
+8. IN-AE confirms that `sub_mn1`, `sub_mn2`, and `sub_mn3` exist before starting FL.
 
-```text
-POST /notify
-```
+![Initial resource and subscription setup](out/FL-diagrams/fig_initial_setup/fig_initial_setup.png)
 
-Actual path before fix:
+### B. Global Model Distribution and Round Command
 
-```text
-POST /TinyIoT/IN-AE/cnt-noti-check
-```
+1. IN-AE creates the initial or newly aggregated global model file.
+2. IN-AE creates a global model metadata CIN under `cnt-global-model`.
+3. IN-AE creates an `FL_TRAINING` command CIN under `cnt-fl-control`.
+4. TinyIoT sends the command NOTIFY to every MN-AE notification endpoint.
+5. Each MN-AE reads the command content and retrieves the global model metadata using `globalModelUri`.
+6. Each MN-AE stores the retrieved model metadata in `cnt-local-model` and updates its local model cache.
 
-The issue occurred because TinyIoT parsed the notification URI correctly but used `o2pt->to` as the HTTP request URI inside `http_notify()`.
+![Global model distribution and round command](out/FL-diagrams/fig_global_distribution/fig_global_distribution.png)
 
-For subscription verification:
+### C. Local Training and Update Upload
 
-```text
-o2pt->to   = TinyIoT/IN-AE/cnt-noti-check
-nt->target = /notify
-```
+1. Each MN-AE loads its local FEMTO bearing data.
+2. Each MN-AE trains a Conv1D Autoencoder using local normal data.
+3. Differential privacy noise is applied during local training according to the configured privacy parameters.
+4. Each MN-AE stores its local model artifact locally.
+5. Each MN-AE creates a local update CIN in its node-specific drop-box container.
+6. TinyIoT sends a local update NOTIFY to the IN-AE notification endpoint.
+7. IN-AE reads `rep.m2m:cin.con` and records the update by node and round.
 
-The fix was to use `nt->target` first when setting the HTTP request URI.
+![Local training and local update notification](out/FL-diagrams/fig_local_training/fig_local_training.png)
 
-```c
-if (nt && strlen(nt->target) > 0)
-{
-    req->uri = strdup(nt->target);
-}
-else
-{
-    req->uri = strdup(o2pt->to);
-}
-```
+### D. Global Aggregation and Next Round
 
-After the fix:
+1. IN-AE waits until all three local update notifications are received.
+2. If a notification is missing at timeout, IN-AE retrieves the latest CIN once from only the missing node container.
+3. IN-AE validates `type`, `round`, and `node` from each update payload.
+4. IN-AE publishes `FL_AGGREGATING` under `cnt-fl-control`.
+5. Loss Z-score-based anomaly detection excludes potentially poisoned updates when applicable.
+6. IN-AE performs weighted FedAvg using valid local model states and sample counts.
+7. IN-AE stores the new global model and publishes its metadata under `cnt-global-model`.
+8. IN-AE publishes the next `FL_TRAINING` command, and the notification-driven cycle repeats.
+9. After the final round, IN-AE publishes `FL_COMPLETED` and runs the cold-start hidden test evaluation.
 
-```text
-Subscription verification request → POST /notify
-Normal notification              → POST /notify
-```
+![Global aggregation and next-round notification](out/FL-diagrams/fig_global_aggregation/fig_global_aggregation.png)
 
-This confirms that TinyIoT can now send HTTP notifications to the path specified by `notificationURI`.
+The final PlantUML diagrams intentionally omit conditional branches and show the MN side as one compressed logical participant. They describe the successful end-to-end execution sequence implemented by the prototype.
 
 ---
 
-## 10. Project Structure
+## 6. FL State and Payloads
+
+### Round Command
+
+```json
+{
+  "type": "fl-command",
+  "jobState": "FL_TRAINING",
+  "currentRound": 1,
+  "maxRounds": 10,
+  "globalModelUri": "TinyIoT/IN-AE/cnt-global-model/la",
+  "securityMode": "DP",
+  "privacyParams": {
+    "epsilon": 12.0,
+    "delta": 0.00001,
+    "max_grad_norm": 1.0
+  },
+  "timestamp": 0.0
+}
+```
+
+### Local Update
+
+```json
+{
+  "type": "fl-update",
+  "node": "mn1",
+  "round": 1,
+  "model_path": "/tmp/fl_models/cache/mn1/local_round1.pt",
+  "train_loss": 0.0,
+  "val_loss": 0.0,
+  "val_auroc": 0.0,
+  "num_samples": 0,
+  "timestamp": 0.0
+}
+```
+
+### Global Model Metadata
+
+```json
+{
+  "type": "global-model",
+  "global_round": 1,
+  "model_path": "/tmp/fl_models/global/global_round1.pt",
+  "model_ready": true,
+  "timestamp": 0.0
+}
+```
+
+### FL States
+
+```text
+FL_READY
+→ FL_TRAINING
+→ FL_AGGREGATING
+→ FL_TRAINING for the next round
+→ FL_COMPLETED
+```
+
+---
+
+## 7. Model and Dataset
+
+| Item | Value |
+| --- | --- |
+| Dataset | FEMTO-ST PRONOSTIA Bearing Dataset |
+| Input | one-channel vibration signal, 2,560 samples |
+| Model | Conv1D Autoencoder |
+| Learning method | unsupervised learning using normal data |
+| Loss | MSE reconstruction loss |
+| Local optimizer | Adam |
+| Aggregation | weighted FedAvg |
+| Global rounds | 10 by default |
+| Local epochs | 10 by default |
+| Batch size | 32 by default |
+| Anomaly score | reconstruction error |
+| Security | local-data retention, DP training, ACP isolation, anomalous update filtering |
+
+Raw bearing data remains at each MN-AE. The coordinator receives only model artifact references and training metadata through oneM2M resources.
+
+---
+
+## 8. Project Structure
 
 ```text
 FL
+├── FL-diagrams/
+│   ├── fig_initial_setup.puml
+│   ├── fig_global_distribution.puml
+│   ├── fig_local_training.puml
+│   └── fig_global_aggregation.puml
+│
 ├── fl/
 │   ├── aggregator.py
 │   ├── config.py
@@ -337,58 +306,48 @@ FL
 │   ├── prepare_data_femto.py
 │   └── setup_resources_standard.py
 │
-├── out/
+├── out/FL-diagrams/
+├── archive/experiments/
 ├── fl_bearing_dashboard.html
 ├── fljob.yaml
-├── main.py
 ├── requirements.txt
 ├── run_fl.sh
-├── clean_fl.sh
-├── fig_initial_setup.puml
-├── fig_global_distribution.puml
-├── fig_local_training.puml
-└── fig_global_aggregation.puml
+└── clean_fl.sh
 ```
+
+### Main Files
+
+| File | Role |
+| --- | --- |
+| `fl/in_ae_standard.py` | IN-AE notification receiver, coordinator, validator, and aggregator |
+| `fl/mn_ae_standard.py` | MN-AE notification receiver, local trainer, model cacher, and update uploader |
+| `fl/setup_resources_standard.py` | Creates oneM2M resources and ACP mappings |
+| `fl/onem2m_utils.py` | Performs oneM2M CREATE, RETRIEVE, UPDATE, DELETE, and subscription operations |
+| `fl/aggregator.py` | Performs FedAvg aggregation |
+| `fl/model.py` | Defines the Conv1D Autoencoder |
+| `fl/dashboard_server.py` | Visualizes FL state by periodically retrieving TinyIoT resources |
+| `run_fl.sh` | Runs data preparation, MN-AEs, IN-AE, and dashboard in the correct order |
 
 ---
 
-## 11. Environment
+## 9. Environment
 
-This project is tested in a WSL environment.
-
-Create and activate a Python virtual environment:
+The prototype is tested in WSL2 with Python 3.10.
 
 ```bash
+cd ~/projects/federated-learning
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
-If dependency installation fails, install the main packages manually:
+If required:
 
 ```bash
 pip install torch numpy pandas pyyaml flask scikit-learn requests
 ```
 
----
-
-## 12. TinyIoT Requirement
-
-TinyIoT must be running before executing the FL prototype.
-
-Example:
-
-```bash
-cd ~/projects/tinyIoT/source/server
-./server
-```
-
-Expected TinyIoT base URL:
+TinyIoT must be running at:
 
 ```text
 http://127.0.0.1:3000/TinyIoT
@@ -396,155 +355,242 @@ http://127.0.0.1:3000/TinyIoT
 
 ---
 
-## 13. How to Run
+## 10. Ports
 
-### 1. Start TinyIoT
+| Component | Port |
+| --- | ---: |
+| TinyIoT CSE | 3000 |
+| MN-AE-1 notification server | 5001 |
+| MN-AE-2 notification server | 5002 |
+| MN-AE-3 notification server | 5003 |
+| IN-AE notification server | 6000 |
+| Dashboard | 7000 |
+
+The node and notification-port pairs must remain consistent:
+
+```text
+node_id 0 → mn1 → 5001
+node_id 1 → mn2 → 5002
+node_id 2 → mn3 → 5003
+```
+
+---
+
+## 11. How to Run
+
+### 11.1 Start TinyIoT
 
 ```bash
 cd ~/projects/tinyIoT/source/server
 ./server
 ```
 
-### 2. Prepare Python Environment
+Check the server:
 
 ```bash
-cd ~/projects/FL
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+curl -i http://127.0.0.1:3000
 ```
 
-### 3. Run Full FL Pipeline
+### 11.2 Automatic Run
+
+`run_fl.sh` starts the MN-AEs before IN-AE so the command subscriptions exist before the first FL command is created.
 
 ```bash
+cd ~/projects/federated-learning
+source .venv/bin/activate
 chmod +x run_fl.sh
 ./run_fl.sh
 ```
 
-The script performs the full FL workflow, including resource setup, local training, global aggregation, and dashboard execution.
+### 11.3 Manual Run
 
----
-
-## 14. Manual Run
-
-If the shell script is not used, run each step manually.
-
-### Setup resources and data
+#### Step 1: Prepare Data and oneM2M Resources
 
 ```bash
+cd ~/projects/federated-learning
+source .venv/bin/activate
+
+python3 fl/prepare_data_femto.py   # may be skipped when prepared data already exists
 python3 fl/setup_resources_standard.py
 python3 fl/data_generator.py
 ```
 
-### Start IN-AE
+#### Step 2: Start MN-AEs First
+
+Open three separate terminals.
+
+```bash
+python3 fl/mn_ae_standard.py 0 5001
+```
+
+```bash
+python3 fl/mn_ae_standard.py 1 5002
+```
+
+```bash
+python3 fl/mn_ae_standard.py 2 5003
+```
+
+Wait until all terminals report subscription verification and `cnt-fl-control` subscription creation.
+
+#### Step 3: Start IN-AE
 
 ```bash
 python3 fl/in_ae_standard.py
 ```
 
-### Start MN-AEs
+IN-AE waits until `sub_mn1`, `sub_mn2`, and `sub_mn3` are ready before publishing the first training command.
 
-Open separate terminals.
-
-```bash
-python3 fl/mn_ae_standard.py 0 5001
-python3 fl/mn_ae_standard.py 1 5002
-python3 fl/mn_ae_standard.py 2 5003
-```
-
-### Start Dashboard
+#### Step 4: Start the Dashboard
 
 ```bash
 python3 fl/dashboard_server.py
 ```
 
-Dashboard URL:
-
 ```text
 http://localhost:7000
 ```
 
----
-
-## 15. Output Paths
-
-The prototype stores model and data artifacts in local temporary paths.
+Correct startup order:
 
 ```text
-/tmp/fl_models/global
-/tmp/fl_data/femto
+TinyIoT
+→ data and resource preparation
+→ MN-AE-1, MN-AE-2, MN-AE-3
+→ command subscriptions ready
+→ IN-AE
+→ dashboard
 ```
 
-Example generated model files:
+---
+
+## 12. Expected Runtime Flow
+
+```text
+MN-AEs subscribe to cnt-fl-control
+IN-AE subscribes to cnt-mn1, cnt-mn2, and cnt-mn3
+IN-AE publishes Round 0 global model
+IN-AE publishes FL_TRAINING for Round 1
+TinyIoT sends command NOTIFY to MN-AEs
+MN-AEs retrieve and cache the global model
+MN-AEs perform local training
+MN-AEs upload local update CINs
+TinyIoT sends update NOTIFY to IN-AE
+IN-AE collects 3/3 updates
+IN-AE publishes FL_AGGREGATING
+IN-AE performs anomaly filtering and FedAvg
+IN-AE publishes the new global model
+IN-AE publishes the next FL_TRAINING command
+...
+IN-AE publishes FL_COMPLETED after Round 10
+```
+
+Example MN-AE log:
+
+```text
+[NOTIFY] mn1 command received: FL_TRAINING, round=1
+Round 1 command received via NOTIFY
+local update uploaded
+wait Round 2
+```
+
+Example IN-AE log:
+
+```text
+[COLLECT/NOTIFY] mn1 Round 1 (1/3)
+[COLLECT/NOTIFY] mn2 Round 1 (2/3)
+[COLLECT/NOTIFY] mn3 Round 1 (3/3)
+All results received by NOTIFY
+FedAvg (Round 1)
+Global model published Round 1
+```
+
+---
+
+## 13. Dashboard Polling
+
+The dashboard periodically performs GET/RETRIEVE requests to show the current FL state.
+
+Example dashboard log:
+
+```text
+[Poll] R9/10 FL_TRAINING nodes=['mn1', 'mn2', 'mn3']
+[Poll] R9/10 FL_AGGREGATING nodes=['mn1', 'mn2', 'mn3']
+[Poll] R10/10 FL_COMPLETED nodes=['mn1', 'mn2', 'mn3']
+```
+
+This polling is only for visualization. The IN-AE and MN-AE round workflow remains subscription-notification driven.
+
+---
+
+## 14. Output Paths
+
+```text
+/tmp/fl_data/femto
+/tmp/fl_models/global
+/tmp/fl_models/cache/mn1
+/tmp/fl_models/cache/mn2
+/tmp/fl_models/cache/mn3
+```
+
+Generated global models:
 
 ```text
 global_round0.pt
 global_round1.pt
-global_round2.pt
 ...
+global_round10.pt
 ```
 
 ---
 
-## 16. Configuration
+## 15. Configuration
 
-Main configuration file:
+Main FL configuration:
 
 ```text
+fl/config.py
 fljob.yaml
 ```
 
-Example oneM2M configuration:
+Useful environment variables:
 
-```yaml
-onem2m:
-  enabled: true
-  base_url: "http://127.0.0.1:3000/TinyIoT"
-  origin: "CAdmin"
-  rvi: "2a"
-  in_ae: "IN-AE"
+```text
+FL_COMMAND_NOTIFY_TIMEOUT
+FL_COLLECTION_NOTIFY_TIMEOUT
+FL_GLOBAL_MODEL_DIR
+FL_HIDDEN_TEST_PATH
 ```
 
 ---
 
-## 17. Planned Work
+## 16. Implementation Status
 
-Next steps:
+Implemented and verified:
 
-```text
-- Add IN-AE notification receiver endpoint.
-- Create subscriptions under cnt-mn1, cnt-mn2, and cnt-mn3.
-- Receive local update notifications instead of polling.
-- Parse rep.m2m:cin.con from notification body.
-- Store received updates by round and node ID.
-- Trigger aggregation when all expected node updates arrive.
-- Keep polling as a fallback mode.
-```
-
-Proposed IN-AE notification endpoint:
-
-```text
-http://127.0.0.1:9100/fl/notify
-```
-
----
-
-## 18. Notes
-
-```text
-- Raw training data remains local to each MN-AE.
-- oneM2M resources are used for metadata exchange and FL procedure coordination.
-- contentInstance.con should be sent as a string for TinyIoT compatibility.
-- Subscription notification has been verified with both verification request and normal notification.
-- The current implementation can be extended to follow the TR-0084 developer guide direction more closely.
-```
+- oneM2M resource and ACP setup
+- MN-AE command subscriptions
+- IN-AE local update subscriptions
+- subscription verification requests
+- command NOTIFY delivery
+- local update NOTIFY delivery
+- notification body parsing through `rep.m2m:cin.con`
+- one-time latest-CIN recovery after notification timeout
+- multi-round FL execution through Round 10
+- Conv1D Autoencoder local training
+- DP configuration and local data retention
+- anomalous update filtering
+- weighted FedAvg aggregation
+- global model redistribution
+- dashboard visualization
+- final cold-start evaluation
 
 ---
 
-## 19. Commit Example
+## 17. Notes
 
-```bash
-git add README.md
-git commit -m "docs: add README for TR-0084 FL prototype"
-git push
-```
+- Raw training data does not leave the MN-AE side.
+- Actual model files are stored in local filesystem paths; oneM2M CINs exchange their metadata and paths.
+- The diagram sequence is written without conditional branches and compresses the repeated MN-side AE/CSE flow into one logical participant.
+- A single missing notification is recovered with one latest-CIN RETRIEVE; the FL coordinator does not perform continuous polling.
+- The TinyIoT notification path must use the path contained in `notificationURI`, such as `/notify`.
