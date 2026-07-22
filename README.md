@@ -157,7 +157,20 @@ http://127.0.0.1:6000/notify
 7. IN-AE starts its notification server and subscribes to each `cnt-mnX` container.
 8. IN-AE confirms that `sub_mn1`, `sub_mn2`, and `sub_mn3` exist before starting FL.
 
-![Initial resource and subscription setup](out/FL-diagrams/fig_initial_setup/fig_initial_setup.png)
+```text
+IN-AE                 TinyIoT CSE                 MN-side[i]
+  |                         |                          |
+  |                         |<-- CREATE AE/CNT/ACP ----|
+  |-- CREATE AE/CNT/ACP --->|                          |
+  |                         |<-- CREATE subscription --|
+  |                         |    to cnt-fl-control     |
+  |-- CREATE subscription ->|                          |
+  |   to cnt-mnX            |                          |
+  |<---- VERIFY NOTIFY -----|----- VERIFY NOTIFY ----->|
+  |                         |                          |
+```
+
+`MN-side[i]` combines the logical behavior of `MN-CSE[i]` and `MN-AE[i]`. The same setup is repeated for `i = 1..3`.
 
 ### B. Global Model Distribution and Round Command
 
@@ -168,7 +181,20 @@ http://127.0.0.1:6000/notify
 5. Each MN-AE reads the command content and retrieves the global model metadata using `globalModelUri`.
 6. Each MN-AE stores the retrieved model metadata in `cnt-local-model` and updates its local model cache.
 
-![Global model distribution and round command](out/FL-diagrams/fig_global_distribution/fig_global_distribution.png)
+```text
+IN-AE                 TinyIoT CSE                 MN-side[i]
+  |                         |                          |
+  |-- CREATE global CIN --->|                          |
+  |-- CREATE command CIN -->|                          |
+  |                         |------ NOTIFY ----------->|
+  |                         |<----- response ----------|
+  |                         |<----- RETRIEVE ----------|
+  |                         |------ model metadata --->|
+  |                         |<-- CREATE local cache ---|
+  |                         |                          |
+```
+
+The command notification and global model retrieval sequence is repeated for each MN side.
 
 ### C. Local Training and Update Upload
 
@@ -180,7 +206,18 @@ http://127.0.0.1:6000/notify
 6. TinyIoT sends a local update NOTIFY to the IN-AE notification endpoint.
 7. IN-AE reads `rep.m2m:cin.con` and records the update by node and round.
 
-![Local training and local update notification](out/FL-diagrams/fig_local_training/fig_local_training.png)
+```text
+IN-AE                 TinyIoT CSE                 MN-side[i]
+  |                         |                          |
+  |                         |                   Local training
+  |                         |                          |
+  |                         |<-- CREATE update CIN ----|
+  |<-------- NOTIFY --------|                          |
+  |-------- response ------>|                          |
+  |                         |                          |
+```
+
+Each MN side uploads its local update to its own `cnt-mnX` drop-box container.
 
 ### D. Global Aggregation and Next Round
 
@@ -194,9 +231,22 @@ http://127.0.0.1:6000/notify
 8. IN-AE publishes the next `FL_TRAINING` command, and the notification-driven cycle repeats.
 9. After the final round, IN-AE publishes `FL_COMPLETED` and runs the cold-start hidden test evaluation.
 
-![Global aggregation and next-round notification](out/FL-diagrams/fig_global_aggregation/fig_global_aggregation.png)
+```text
+IN-AE                 TinyIoT CSE                 MN-side[i]
+  |                         |                          |
+  |<---- NOTIFY updates ----|                          |
+  |                         |                          |
+  |   Validate and aggregate local model updates      |
+  |                         |                          |
+  |-- CREATE global CIN --->|                          |
+  |-- CREATE next command ->|                          |
+  |                         |------ NOTIFY ----------->|
+  |                         |                          |
+```
 
-The final PlantUML diagrams intentionally omit conditional branches and show the MN side as one compressed logical participant. They describe the successful end-to-end execution sequence implemented by the prototype.
+The next-round command starts the same distribution, local training, upload, and aggregation cycle again.
+
+The text sequences intentionally omit conditional branches and show `MN-CSE[i]` and `MN-AE[i]` as one compressed logical `MN-side[i]` participant. They describe the successful end-to-end execution sequence implemented by the prototype.
 
 ---
 
