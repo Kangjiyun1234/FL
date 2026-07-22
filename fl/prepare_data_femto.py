@@ -220,28 +220,94 @@ def process_node(node: str) -> dict:
     val_labels  = val_labels[shuffle_idx]
 
     # ── Test_stream ───────────────────────────────────────
-    # Bearing2_1은 초기 열화 신호가 불규칙 → 명확한 고장 신호(RMS > 2.0g)만 이상으로 정의
+    # Bearing2_1은 초기 열화 신호가 불규칙하므로
+    # 명확한 고장 신호(RMS > 2.0g)만 이상으로 정의
     test_threshold = 2.0 if condition == 2 else None
+
     signals_2, rms_2 = load_bearing_signals(test_src_dir)
-    normal_2, anomaly_2 = split_normal_anomaly(signals_2, rms_2, threshold=test_threshold)
-    thr_str = f"{test_threshold}g" if test_threshold else f"{RMS_FAULT_THRESHOLD}g"
-    print(f"  {ts_name} (test_stream, 이상기준={thr_str}): 전체={len(signals_2)}  정상={len(normal_2)}  이상={len(anomaly_2)}")
+    normal_2, anomaly_2 = split_normal_anomaly(
+        signals_2,
+        rms_2,
+        threshold=test_threshold,
+    )
 
-    if node in FULL_TEST_STREAM_NODES:
-        # 고장 전이 노드: 전체 run-to-failure 시계열을 시간순으로 유지 (캡 없음)
-        # 정상 → 이상 전체 흐름을 보여주는 것이 목적
-        test_normal_sig  = normalize(to_array(normal_2),  norm_mean, norm_std)
-        test_anomaly_sig = normalize(to_array(anomaly_2), norm_mean, norm_std)
-        print(f"  → 고장 전이 노드: 전체 시계열 유지 (정상={len(normal_2)}, 이상={len(anomaly_2)})")
+    thr_str = (
+        f"{test_threshold}g"
+        if test_threshold
+        else f"{RMS_FAULT_THRESHOLD}g"
+    )
+
+    print(
+        f"  {ts_name} "
+        f"(test_stream, 이상기준={thr_str}): "
+        f"전체={len(signals_2)} "
+        f"정상={len(normal_2)} "
+        f"이상={len(anomaly_2)}"
+    )
+
+    if NODE_ROLES[node] == "normal_support":
+        # mn1, mn2:
+        # 정상 지원 노드이므로 대시보드 스트림에는 정상 샘플만 사용
+        test_normal_sig = normalize(
+            cap_shuffle(
+                to_array(normal_2),
+                MAX_TEST_NORMAL,
+                np_rng,
+            ),
+            norm_mean,
+            norm_std,
+        )
+
+        test_anomaly_sig = np.empty(
+            (0, SEQ_LEN),
+            dtype=np.float32,
+        )
+
+        print(
+            f"  → 정상 지원 노드: "
+            f"대시보드 스트림에 정상 데이터만 사용 "
+            f"(정상={len(test_normal_sig)}, 이상=0)"
+        )
+
     else:
-        # 정상 지원 노드: 랜덤 샘플링 (평가 참고용)
-        test_normal_sig  = normalize(cap_shuffle(to_array(normal_2),  MAX_TEST_NORMAL,  np_rng), norm_mean, norm_std)
-        test_anomaly_sig = normalize(cap_shuffle(to_array(anomaly_2), MAX_TEST_ANOMALY, np_rng), norm_mean, norm_std)
+        # mn3:
+        # 정상에서 이상으로 넘어가는 고장 전이 시나리오
+        test_normal_sig = normalize(
+            cap_shuffle(
+                to_array(normal_2),
+                MAX_TEST_NORMAL,
+                np_rng,
+            ),
+            norm_mean,
+            norm_std,
+        )
 
-    test_stream_signals = np.concatenate([test_normal_sig, test_anomaly_sig], axis=0)
-    test_stream_labels  = np.array(
-        [0] * len(test_normal_sig) + [1] * len(test_anomaly_sig),
-        dtype=np.int64
+        test_anomaly_sig = normalize(
+            cap_shuffle(
+                to_array(anomaly_2),
+                MAX_TEST_ANOMALY,
+                np_rng,
+            ),
+            norm_mean,
+            norm_std,
+        )
+
+        print(
+            f"  → 고장 전이 노드: "
+            f"정상→이상 스트림 구성 "
+            f"(정상={len(test_normal_sig)}, "
+            f"이상={len(test_anomaly_sig)})"
+        )
+
+    test_stream_signals = np.concatenate(
+        [test_normal_sig, test_anomaly_sig],
+        axis=0,
+    )
+
+    test_stream_labels = np.array(
+        [0] * len(test_normal_sig)
+        + [1] * len(test_anomaly_sig),
+        dtype=np.int64,
     )
 
     print(f"\n  [Test_set 합계]")
