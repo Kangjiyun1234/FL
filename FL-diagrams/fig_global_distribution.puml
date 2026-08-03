@@ -1,199 +1,99 @@
-@startuml fig_global_distribution
+@startuml
+title 9.8.7 Training Round Command Creation\nand Global Model Distribution
 
-skinparam roundCorner 0
-skinparam DefaultFontName Arial
-skinparam DefaultFontSize 11
-skinparam DefaultFontColor #333333
-skinparam DefaultFontStyle plain
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
 
 skinparam sequence {
-    ParticipantBackgroundColor #C8DCF0
-    ParticipantFontName Arial
-    ParticipantFontColor black
-    ParticipantBorderColor #7BA7C7
-    ParticipantFontSize 11
-    ParticipantFontStyle bold
-
     ArrowColor #333333
-    ArrowFontName Arial
-    ArrowFontSize 10
-    ArrowFontColor #333333
-    ArrowFontStyle plain
-
-    LifeLineBorderColor #AAAAAA
-
-    ActivationBorderColor #7BA7C7
-    ActivationBackgroundColor #C8DCF0
-
-    NoteBackgroundColor #D6EAF8
-    NoteBorderColor #7BA7C7
-    NoteFontName Arial
-    NoteFontSize 10
-    NoteFontColor #333333
-    NoteFontStyle plain
-
-    BoxBackgroundColor #EEF5FB
-    BoxBorderColor #7BA7C7
-    BoxFontName Arial
-    BoxFontColor #333333
-    BoxFontSize 11
-    BoxFontStyle bold
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
 }
 
-box "Factory A" #EBF5FB
-    participant "MN-AE1"  as MNAE1
-    participant "MN-CSE1" as MNCSE1
+legend top left
+  i = 1..N (factory index)
+
+  CIN : contentInstance
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
+endlegend
+
+box "Factory i" #EAF2FC
+participant "MN-AE[i]" as MNAE
+participant "MN-CSE[i]" as MNCSE
 end box
 
-box "Factory B" #EBF5FB
-    participant "MN-AE2"  as MNAE2
-    participant "MN-CSE2" as MNCSE2
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
 end box
 
-box "Factory C" #EBF5FB
-    participant "MN-AE3"  as MNAE3
-    participant "MN-CSE3" as MNCSE3
-end box
 
-box "Cloud Service Platform" #FEF9E7
-    participant "IN-CSE" as INCSE
-    participant "IN-AE"  as INAE
-end box
+note over INCSE, INAE
+The global model metadata referenced by the command
+is stored under cnt-global-model.
 
-' Step 1
-INAE -> INCSE : 1
-note right
-  Create contentInstance
-  under cnt-global-model
-
-  con:
-  - type = global-model
-  - globalRound = n
-  - modelPath
-  - modelReady
-  - timestamp
+globalModelUri targets cnt-global-model/la.
 end note
 
-' Step 2
-INAE -> INCSE : 2
-note right
-  Create contentInstance
-  under cnt-fl-control
 
-  con:
-  - type = fl-command
-  - jobState = TRAINING
-  - currentRound = n
-  - globalModelUri
-  - securityMode
-  - privacyParams
-  - maxRounds
-  - timestamp
-end note
+== 9.8.7 Training Round Command Creation ==
 
-' Step 3
-INCSE -> MNCSE1 : 3-1
-note right
-  NOTIFY
-  To: MN-AE1
+INAE -> INCSE : CREATE <CIN>\nunder IN-AE/cnt-fl-control\ncon:\ntype = fl-command\njobState = START_ROUND\ncurrentRound = n\nglobalModelUri = /IN-AE/cnt-global-model/la\ntimestamp
 
-  New contentInstance created
-  under cnt-fl-control
-end note
+INCSE --> INAE : CREATE Response\n2001 CREATED
 
-MNCSE1 -> MNAE1 : 3-1 Forward NOTIFY
 
-INCSE -> MNCSE2 : 3-2
-note right
-  NOTIFY
-  To: MN-AE2
+== Cross-CSE Round Command Notification ==
 
-  New contentInstance created
-  under cnt-fl-control
-end note
+loop for each factory i = 1..N
+    INCSE -> MNCSE : NOTIFY\nNew round-command <CIN>\nTo: MN-AE[i]\njobState = START_ROUND\ncurrentRound = n\nglobalModelUri
 
-MNCSE2 -> MNAE2 : 3-2 Forward NOTIFY
+    MNCSE -> MNAE : Forward NOTIFY via Mca
 
-INCSE -> MNCSE3 : 3-3
-note right
-  NOTIFY
-  To: MN-AE3
+    MNAE --> MNCSE : NOTIFY Response\n2000 OK
+    MNCSE --> INCSE : Forward NOTIFY Response
+end
 
-  New contentInstance created
-  under cnt-fl-control
-end note
 
-MNCSE3 -> MNAE3 : 3-3 Forward NOTIFY
+== Global Model Metadata Retrieval ==
 
-' Step 4
-MNAE1 -> MNCSE1 : 4-1
-note right
-  RETRIEVE global model
-  using globalModelUri
-end note
+loop for each factory i = 1..N
+    MNAE -> MNCSE : RETRIEVE\ntarget = /IN-AE/cnt-global-model/la
 
-MNCSE1 -> INCSE : 4-1 Forward RETRIEVE
-INCSE --> MNCSE1 : 4-1 Global model Response
-MNCSE1 --> MNAE1 : 4-1 Forward Response
+    MNCSE -> INCSE : Forward RETRIEVE via Mcc\ntarget = /IN-AE/cnt-global-model/la
 
-MNAE2 -> MNCSE2 : 4-2
-note right
-  RETRIEVE global model
-  using globalModelUri
-end note
+    INCSE --> MNCSE : RETRIEVE Response\nglobalRound\nmodelURI\nchecksum\nmodelSize\ntimestamp
 
-MNCSE2 -> INCSE : 4-2 Forward RETRIEVE
-INCSE --> MNCSE2 : 4-2 Global model Response
-MNCSE2 --> MNAE2 : 4-2 Forward Response
+    MNCSE --> MNAE : Forward RETRIEVE Response
+end
 
-MNAE3 -> MNCSE3 : 4-3
-note right
-  RETRIEVE global model
-  using globalModelUri
-end note
 
-MNCSE3 -> INCSE : 4-3 Forward RETRIEVE
-INCSE --> MNCSE3 : 4-3 Global model Response
-MNCSE3 --> MNAE3 : 4-3 Forward Response
+== Global Model Download and Local Cache ==
 
-' Step 5
-MNAE1 -> MNCSE1 : 5-1
-note right
-  Create global model contentInstance
-  under MN-AE1/cnt-local-model
+loop for each factory i = 1..N
+    MNAE -> MNAE : Download global model file\nusing modelURI\nVerify checksum
 
-  con:
-  - type = global-model
-  - globalRound = n
-  - modelPath
-  - modelReady
-  - timestamp
-end note
+    MNAE -> MNCSE : CREATE <CIN>\nunder MN-AE[i]/cnt-local-model\ncon:\ntype = global-model-cache\nglobalRound = n\nsourceModelURI\nlocalModelURI\nchecksum\ntimestamp
 
-MNAE2 -> MNCSE2 : 5-2
-note right
-  Create global model contentInstance
-  under MN-AE2/cnt-local-model
+    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+end
 
-  con:
-  - type = global-model
-  - globalRound = n
-  - modelPath
-  - modelReady
-  - timestamp
-end note
-
-MNAE3 -> MNCSE3 : 5-3
-note right
-  Create global model contentInstance
-  under MN-AE3/cnt-local-model
-
-  con:
-  - type = global-model
-  - globalRound = n
-  - modelPath
-  - modelReady
-  - timestamp
+note over MNAE, INAE
+The same notification, retrieval and local-cache procedure
+is reused after a START_NEXT_ROUND command in clause 9.8.9.
 end note
 
 @enduml

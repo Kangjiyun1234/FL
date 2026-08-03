@@ -1,344 +1,182 @@
-@startuml fig_initial_setup
+@startuml
+title Initial Setup Procedures\nClauses 9.8.2 to 9.8.6
 
-skinparam roundCorner 0
-skinparam DefaultFontName Arial
-skinparam DefaultFontSize 11
-skinparam DefaultFontColor #333333
-skinparam DefaultFontStyle plain
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
 
 skinparam sequence {
-    ParticipantBackgroundColor #C8DCF0
-    ParticipantFontName Arial
-    ParticipantFontColor black
-    ParticipantBorderColor #7BA7C7
-    ParticipantFontSize 11
-    ParticipantFontStyle bold
-
     ArrowColor #333333
-    ArrowFontName Arial
-    ArrowFontSize 10
-    ArrowFontColor #333333
-    ArrowFontStyle plain
-
-    LifeLineBorderColor #AAAAAA
-
-    ActivationBorderColor #7BA7C7
-    ActivationBackgroundColor #C8DCF0
-
-    NoteBackgroundColor #D6EAF8
-    NoteBorderColor #7BA7C7
-    NoteFontName Arial
-    NoteFontSize 10
-    NoteFontColor #333333
-    NoteFontStyle plain
-
-    BoxBackgroundColor #EEF5FB
-    BoxBorderColor #7BA7C7
-    BoxFontName Arial
-    BoxFontColor #333333
-    BoxFontSize 11
-    BoxFontStyle bold
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
 }
 
-box "Factory A" #EBF5FB
-participant "ADN-AE1" as ADN1
-participant "MN-AE1" as MNAE1
-participant "MN-CSE1" as MNCSE1
+legend top left
+  i = 1..N (factory index)
+
+  AE  : Application Entity
+  CSR : remoteCSE
+  ACP : accessControlPolicy
+  CNT : container
+  SUB : subscription
+
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
+endlegend
+
+box "Factory i" #EAF2FC
+participant "ADN-AE[i]" as ADN
+participant "MN-AE[i]" as MNAE
+participant "MN-CSE[i]" as MNCSE
 end box
 
-box "Factory B" #EBF5FB
-participant "ADN-AE2" as ADN2
-participant "MN-AE2" as MNAE2
-participant "MN-CSE2" as MNCSE2
-end box
-
-box "Factory C" #EBF5FB
-participant "ADN-AE3" as ADN3
-participant "MN-AE3" as MNAE3
-participant "MN-CSE3" as MNCSE3
-end box
-
-box "Cloud Service Platform" #FEF9E7
+box "Cloud Service Platform" #FFF8E7
 participant "IN-CSE" as INCSE
 participant "IN-AE" as INAE
 end box
 
 
-' Step 1
-INAE -> INCSE : 1
-note right
-Register IN-AE (Mca)
+== 9.8.2 MN-CSE Registration ==
+
+loop for each factory i = 1..N
+    MNCSE -> INCSE : CREATE <remoteCSE>\nMN-CSE[i] registration via Mcc
+    INCSE --> MNCSE : CREATE Response\n2001 CREATED
+
+    MNCSE -> INCSE : RETRIEVE <CSEBase>\nIN-CSE information
+    INCSE --> MNCSE : RETRIEVE Response\nIN-CSE identifiers and addressing information
+
+    MNCSE -> MNCSE : Create counterpart <remoteCSE>\nrepresenting IN-CSE locally
+end
+
+
+== 9.8.3 Application Entities Registration ==
+
+loop 9.8.3.1 ADN-AE-X, i = 1..N
+    ADN -> MNCSE : CREATE <AE>\nADN-AE[i] via Mca
+    MNCSE --> ADN : CREATE Response\n2001 CREATED
+end
+
+loop 9.8.3.2 MN-AE-X, i = 1..N
+    MNAE -> MNCSE : CREATE <AE>\nMN-AE[i] via Mca
+    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+end
+
+INAE -> INCSE : 9.8.3.3 CREATE <AE>\nIN-AE via Mca
+INCSE --> INAE : CREATE Response\n2001 CREATED
+
+
+== 9.8.4 Access Control Policy Creation ==
+
+INAE -> INCSE : 9.8.4.1 CREATE <ACP>\nrn = acp-fl-control\nIN-AE: 15\nMN-AE[i]: 3
+INCSE --> INAE : CREATE Response\n2001 CREATED
+
+INAE -> INCSE : CREATE <ACP>\nrn = acp-global-model\nIN-AE: 15\nMN-AE[i]: 2
+INCSE --> INAE : CREATE Response\n2001 CREATED
+
+loop Create one local-update ACP per factory, i = 1..N
+    INAE -> INCSE : CREATE <ACP>\nrn = acp-local-update-mn[i]\nIN-AE: 3\nMN-AE[i]: 1
+    INCSE --> INAE : CREATE Response\n2001 CREATED
+end
+
+loop 9.8.4.2 Local ACP creation, i = 1..N
+    MNAE -> MNCSE : CREATE <ACP>\nrn = acp-sensor-data-i\nADN-AE[i]: 15\nMN-AE[i]: 3
+    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+
+    MNAE -> MNCSE : CREATE <ACP>\nrn = acp-local-model-i\nMN-AE[i]: 15
+    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+end
+
+
+== 9.8.5 Containers Creation ==
+
+loop 9.8.5.1 Local containers, i = 1..N
+    ADN -> MNCSE : CREATE <CNT>\nunder ADN-AE[i]\nrn = cnt-sensor-data\nacpi = acp-sensor-data-i
+    MNCSE --> ADN : CREATE Response\n2001 CREATED
+
+    MNAE -> MNCSE : CREATE <CNT>\nunder MN-AE[i]\nrn = cnt-local-model\nacpi = acp-local-model-i
+    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+end
+
+INAE -> INCSE : 9.8.5.2 CREATE <CNT>\nunder IN-AE\nrn = cnt-fl-control\nacpi = acp-fl-control
+INCSE --> INAE : CREATE Response\n2001 CREATED
+
+INAE -> INCSE : CREATE <CNT>\nunder IN-AE\nrn = cnt-global-model\nacpi = acp-global-model
+INCSE --> INAE : CREATE Response\n2001 CREATED
+
+INAE -> INCSE : CREATE <CNT>\nunder IN-AE\nrn = cnt-local-updates
+INCSE --> INAE : CREATE Response\n2001 CREATED
+
+loop Create one child container per factory, i = 1..N
+    INAE -> INCSE : CREATE <CNT>\nunder cnt-local-updates\nrn = cnt-mn[i]\nacpi = acp-local-update-mn[i]
+    INCSE --> INAE : CREATE Response\n2001 CREATED
+end
+
+
+== 9.8.6.1 sub-sensor-data — Local Subscription ==
+
+loop for each factory i = 1..N
+    MNAE -> MNCSE : CREATE <SUB>\nunder ADN-AE[i]/cnt-sensor-data\nrn = sub-sensor-data-i\nnu = MN-AE[i]\nnet = 3
+    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+end
+
+note over ADN, MNCSE
+The subscription request and subsequent notifications
+remain within MN-CSE[i].
 end note
 
 
-' Step 2
-MNCSE1 -> INCSE : 2-1
-note right
-Register MN-CSE1 to IN-CSE (Mcc)
-end note
+== 9.8.6.2 sub-fl-control-mnX — Cross-CSE Subscription ==
 
-MNCSE2 -> INCSE : 2-2
-note right
-Register MN-CSE2 to IN-CSE (Mcc)
-end note
+loop for each factory i = 1..N
+    MNAE -> MNCSE : CREATE <SUB>\ntarget = IN-AE/cnt-fl-control\nrn = sub-fl-control-mn[i]\nnu = MN-AE[i]\nnet = 3
 
-MNCSE3 -> INCSE : 2-3
-note right
-Register MN-CSE3 to IN-CSE (Mcc)
-end note
+    MNCSE -> INCSE : Forward CREATE via Mcc\ntarget = IN-AE/cnt-fl-control
 
+    INCSE --> MNCSE : CREATE Response\n2001 CREATED
+    MNCSE --> MNAE : Forward CREATE Response
+end
 
-' Step 3
-MNAE1 -> MNCSE1 : 3-1
-note right
-Register MN-AE1 (Mca)
-end note
+note over MNAE, INCSE
+The subscription resource is hosted under
+cnt-fl-control on the IN-CSE.
 
-MNAE2 -> MNCSE2 : 3-2
-note right
-Register MN-AE2 (Mca)
-end note
-
-MNAE3 -> MNCSE3 : 3-3
-note right
-Register MN-AE3 (Mca)
+Subsequent notifications are routed through:
+IN-CSE → MN-CSE[i] via Mcc
+MN-CSE[i] → MN-AE[i] via Mca
 end note
 
 
-' Step 4
-ADN1 -> MNCSE1 : 4-1
-note right
-Register ADN-AE1 to MN-CSE1 (Mca)
-end note
+== 9.8.6.3 sub-in-dropbox-mnX — Local Subscription ==
 
-ADN2 -> MNCSE2 : 4-2
-note right
-Register ADN-AE2 to MN-CSE2 (Mca)
-end note
+loop for each factory dropbox i = 1..N
+    INAE -> INCSE : CREATE <SUB>\nunder cnt-local-updates/cnt-mn[i]\nrn = sub-in-dropbox-mn[i]\nnu = IN-AE\nnet = 3
+    INCSE --> INAE : CREATE Response\n2001 CREATED
+end
 
-ADN3 -> MNCSE3 : 4-3
-note right
-Register ADN-AE3 to MN-CSE3 (Mca)
+note over INCSE, INAE
+The subscription request and subsequent local-update
+notifications remain within the IN-CSE.
 end note
 
 
-' Step 4-A: Create ACPs on IN-CSE
-INAE -> INCSE : 4-A-1
-note right
-Create accessControlPolicy:
-- acp-fl-control
-end note
+note over ADN, INAE
+Initial setup complete.
 
-INAE -> INCSE : 4-A-2
-note right
-Create accessControlPolicy:
-- acp-global-model
-end note
-
-INAE -> INCSE : 4-A-3
-note right
-Create accessControlPolicy:
-- acp-local-update-mn1
-end note
-
-INAE -> INCSE : 4-A-4
-note right
-Create accessControlPolicy:
-- acp-local-update-mn2
-end note
-
-INAE -> INCSE : 4-A-5
-note right
-Create accessControlPolicy:
-- acp-local-update-mn3
-end note
-
-
-' Step 4-B: Create local ACPs on each MN-CSE
-MNAE1 -> MNCSE1 : 4-B-1
-note right
-Create local accessControlPolicies:
-- acp-sensor-data-1
-- acp-local-model-1
-end note
-
-MNAE2 -> MNCSE2 : 4-B-2
-note right
-Create local accessControlPolicies:
-- acp-sensor-data-2
-- acp-local-model-2
-end note
-
-MNAE3 -> MNCSE3 : 4-B-3
-note right
-Create local accessControlPolicies:
-- acp-sensor-data-3
-- acp-local-model-3
-end note
-
-
-' Step 5
-INAE -> INCSE : 5
-note right
-Create FL management containers:
-- cnt-fl-control
-  acpi: acp-fl-control
-- cnt-global-model
-  acpi: acp-global-model
-- cnt-local-updates
-  - cnt-mn1
-    acpi: acp-local-update-mn1
-  - cnt-mn2
-    acpi: acp-local-update-mn2
-  - cnt-mn3
-    acpi: acp-local-update-mn3
-end note
-
-
-' Step 6
-MNAE1 -> MNCSE1 : 6-1
-note right
-Create local containers on MN-CSE1:
-- cnt-sensor-data
-  acpi: acp-sensor-data-1
-- cnt-local-model
-  acpi: acp-local-model-1
-end note
-
-MNAE2 -> MNCSE2 : 6-2
-note right
-Create local containers on MN-CSE2:
-- cnt-sensor-data
-  acpi: acp-sensor-data-2
-- cnt-local-model
-  acpi: acp-local-model-2
-end note
-
-MNAE3 -> MNCSE3 : 6-3
-note right
-Create local containers on MN-CSE3:
-- cnt-sensor-data
-  acpi: acp-sensor-data-3
-- cnt-local-model
-  acpi: acp-local-model-3
-end note
-
-
-' Step 7
-ADN1 -> MNCSE1 : 7-1
-note right
-Upload sensor metadata
-to cnt-sensor-data
-end note
-
-ADN2 -> MNCSE2 : 7-2
-note right
-Upload sensor metadata
-to cnt-sensor-data
-end note
-
-ADN3 -> MNCSE3 : 7-3
-note right
-Upload sensor metadata
-to cnt-sensor-data
-end note
-
-
-' Step 8-1
-MNAE1 -> MNCSE1 : 8-1
-note right
-Create subscription:
-- To: cnt-fl-control
-- notificationURI: MN-AE1
-- enc.net: [3]
-end note
-
-MNCSE1 -> INCSE : 8-1 Forward CREATE
-
-INCSE -> MNCSE1 : Verification NOTIFY
-note right
-verificationRequest = true
-end note
-
-MNCSE1 -> MNAE1 : Forward verification NOTIFY
-MNAE1 --> MNCSE1 : Notify Response
-MNCSE1 --> INCSE : Forward Notify Response
-
-INCSE --> MNCSE1 : CREATE Response
-MNCSE1 --> MNAE1 : Forward success Response
-
-
-' Step 8-2
-MNAE2 -> MNCSE2 : 8-2
-note right
-Create subscription:
-- To: cnt-fl-control
-- notificationURI: MN-AE2
-- enc.net: [3]
-end note
-
-MNCSE2 -> INCSE : 8-2 Forward CREATE
-
-INCSE -> MNCSE2 : Verification NOTIFY
-note right
-verificationRequest = true
-end note
-
-MNCSE2 -> MNAE2 : Forward verification NOTIFY
-MNAE2 --> MNCSE2 : Notify Response
-MNCSE2 --> INCSE : Forward Notify Response
-
-INCSE --> MNCSE2 : CREATE Response
-MNCSE2 --> MNAE2 : Forward success Response
-
-
-' Step 8-3
-MNAE3 -> MNCSE3 : 8-3
-note right
-Create subscription:
-- To: cnt-fl-control
-- notificationURI: MN-AE3
-- enc.net: [3]
-end note
-
-MNCSE3 -> INCSE : 8-3 Forward CREATE
-
-INCSE -> MNCSE3 : Verification NOTIFY
-note right
-verificationRequest = true
-end note
-
-MNCSE3 -> MNAE3 : Forward verification NOTIFY
-MNAE3 --> MNCSE3 : Notify Response
-MNCSE3 --> INCSE : Forward Notify Response
-
-INCSE --> MNCSE3 : CREATE Response
-MNCSE3 --> MNAE3 : Forward success Response
-
-
-' Step 9
-INAE -> INCSE : 9
-note right
-Create subscriptions to:
-- cnt-local-updates/cnt-mn1
-- cnt-local-updates/cnt-mn2
-- cnt-local-updates/cnt-mn3
-
-notificationURI: IN-AE
-enc.net: [3]
-end note
-
-INCSE -> INAE : Verification NOTIFY
-note right
-verificationRequest = true
-end note
-
-INAE --> INCSE : Notify Response
-INCSE --> INAE : CREATE Response
-
-note right
-Subscriptions are reused
-across multiple FL rounds.
+Registration, ACP, container and subscription resources
+are reused across multiple federated-learning rounds.
 end note
 
 @enduml

@@ -1,0 +1,81 @@
+@startwbs
+
+<style>
+wbsDiagram {
+  node {
+    BackgroundColor white
+    LineColor black
+    FontColor black
+  }
+
+  arrow {
+    LineColor black
+  }
+
+  :depth(0) {
+    arrow {
+      LineColor white
+    }
+  }
+
+  .hidden {
+    BackgroundColor white
+    LineColor white
+    FontColor white
+  }
+}
+</style>
+
+legend bottom right
+  //i// = 1..N (factory index)
+
+  == acop (accessControlOperations) ==
+  CREATE = 1
+  RETRIEVE = 2
+  UPDATE = 4
+  DELETE = 8
+  NOTIFY = 16
+  DISCOVERY = 32
+
+  3 = CREATE + RETRIEVE
+  15 = CREATE + RETRIEVE + UPDATE + DELETE
+
+  == enc.net (notificationEventType) ==
+  3 = Create of Direct Child Resource
+endlegend
+
+* Root <<hidden>>
+
+** <CSEBase> IN-CSE
+*** <remoteCSE> MN-CSE[//i//]
+
+*** <ACP> acp-fl-control\n[IN-AE: 15, MN-AE[//i//]: 3]
+*** <ACP> acp-global-model\n[IN-AE: 15, MN-AE[//i//]: 2]
+*** <ACP> acp-local-update-mn[//i//]\n[IN-AE: 3, MN-AE[//i//]: 1]
+
+*** <AE> IN-AE (Aggregator)
+**** <CNT> cnt-fl-control\n[acpi: acp-fl-control]
+***** <SUB> sub-fl-control-mn[//i//]\n[nu: MN-AE[//i//], net: 3]
+
+**** <CNT> cnt-global-model\n[acpi: acp-global-model]
+
+**** <CNT> cnt-local-updates
+***** <CNT> cnt-mn[//i//]\n[acpi: acp-local-update-mn[//i//]]
+****** <SUB> sub-in-dropbox-mn[//i//]\n[nu: IN-AE, net: 3]
+
+
+** <CSEBase> MN-CSE[//i//]
+*** <remoteCSE> IN-CSE
+
+*** <ACP> acp-sensor-data-[//i//]\n[ADN-AE[//i//]: 15, MN-AE[//i//]: 3]
+*** <ACP> acp-local-model-[//i//]\n[MN-AE[//i//]: 15]
+
+*** <AE> ADN-AE[//i//] (Sensor Producer)
+**** <CNT> cnt-sensor-data\n[acpi: acp-sensor-data-[//i//]]
+***** <CIN> sensor-data metadata
+***** <SUB> sub-sensor-data-[//i//]\n[nu: MN-AE[//i//], net: 3]
+
+*** <AE> MN-AE[//i//] (Factory Gateway / Trainer)
+**** <CNT> cnt-local-model\n[acpi: acp-local-model-[//i//]]
+
+@endwbs
