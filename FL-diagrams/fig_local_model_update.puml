@@ -1,0 +1,89 @@
+@startuml
+title 9.8.7 Local Model Training\nand Local Model Update Upload
+
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+
+skinparam sequence {
+    ArrowColor #333333
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
+}
+
+legend top left
+  X = 1..N (factory index)
+
+  CIN : contentInstance
+
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
+endlegend
+
+box "Factory X" #EAF2FC
+participant "ADN-AE-X" as ADN
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
+end box
+
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
+end box
+
+
+== Local Sensor Data Retrieval ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 1. RETRIEVE sensor data
+    MNCSE --> MNAE : 2. RETRIEVE Response
+end
+
+
+== Cached Global Model Retrieval ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 3. RETRIEVE cached global model
+    MNCSE --> MNAE : 4. RETRIEVE Response
+end
+
+
+== Local Model Training ==
+
+loop for each factory X = 1..N
+    MNAE -> MNAE : 5. Train local model
+    MNAE -> MNAE : 6. Store local weights
+end
+
+
+== Local Model Update Upload ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 7. CREATE local-update <CIN>\nunder cnt-mnX
+    MNCSE -> INCSE : 8. Forward CREATE via Mcc
+    INCSE --> MNCSE : 9. CREATE Response\n2001 CREATED
+    MNCSE --> MNAE : 10. Forward CREATE Response
+end
+
+
+== Local Update Notification ==
+
+loop for each factory X = 1..N
+    INCSE -> INAE : 11. NOTIFY local-update arrival\nfrom cnt-mnX
+    INAE --> INCSE : 12. NOTIFY Response\n2000 OK
+end
+
+@enduml

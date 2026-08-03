@@ -27,7 +27,7 @@ wbsDiagram {
 </style>
 
 legend bottom right
-  //i// = 1..N (factory index)
+  //X// = 1..N (factory index)
 
   == acop (accessControlOperations) ==
   CREATE = 1
@@ -47,35 +47,35 @@ endlegend
 * Root <<hidden>>
 
 ** <CSEBase> IN-CSE
-*** <remoteCSE> MN-CSE[//i//]
+*** <remoteCSE> MN-CSE-//X//
 
-*** <ACP> acp-fl-control\n[IN-AE: 15, MN-AE[//i//]: 3]
-*** <ACP> acp-global-model\n[IN-AE: 15, MN-AE[//i//]: 2]
-*** <ACP> acp-local-update-mn[//i//]\n[IN-AE: 3, MN-AE[//i//]: 1]
+*** <ACP> acp-fl-control\n[IN-AE: 15, MN-AE-//X//: 3]
+*** <ACP> acp-global-model\n[IN-AE: 15, MN-AE-//X//: 2]
+*** <ACP> acp-local-update-mn//X//\n[IN-AE: 3, MN-AE-//X//: 1]
 
 *** <AE> IN-AE (Aggregator)
 **** <CNT> cnt-fl-control\n[acpi: acp-fl-control]
-***** <SUB> sub-fl-control-mn[//i//]\n[nu: MN-AE[//i//], net: 3]
+***** <SUB> sub-fl-control-mn//X//\n[nu: MN-AE-//X//, net: 3]
 
 **** <CNT> cnt-global-model\n[acpi: acp-global-model]
 
 **** <CNT> cnt-local-updates
-***** <CNT> cnt-mn[//i//]\n[acpi: acp-local-update-mn[//i//]]
-****** <SUB> sub-in-dropbox-mn[//i//]\n[nu: IN-AE, net: 3]
+***** <CNT> cnt-mn//X//\n[acpi: acp-local-update-mn//X//]
+****** <SUB> sub-in-dropbox-mn//X//\n[nu: IN-AE, net: 3]
 
 
-** <CSEBase> MN-CSE[//i//]
+** <CSEBase> MN-CSE-//X//
 *** <remoteCSE> IN-CSE
 
-*** <ACP> acp-sensor-data-[//i//]\n[ADN-AE[//i//]: 15, MN-AE[//i//]: 3]
-*** <ACP> acp-local-model-[//i//]\n[MN-AE[//i//]: 15]
+*** <ACP> acp-sensor-data-//X//\n[ADN-AE-//X//: 15, MN-AE-//X//: 3]
+*** <ACP> acp-local-model-//X//\n[MN-AE-//X//: 15]
 
-*** <AE> ADN-AE[//i//] (Sensor Producer)
-**** <CNT> cnt-sensor-data\n[acpi: acp-sensor-data-[//i//]]
+*** <AE> ADN-AE-//X// (Sensor Producer)
+**** <CNT> cnt-sensor-data\n[acpi: acp-sensor-data-//X//]
 ***** <CIN> sensor-data metadata
-***** <SUB> sub-sensor-data-[//i//]\n[nu: MN-AE[//i//], net: 3]
+***** <SUB> sub-sensor-data-//X//\n[nu: MN-AE-//X//, net: 3]
 
-*** <AE> MN-AE[//i//] (Factory Gateway / Trainer)
-**** <CNT> cnt-local-model\n[acpi: acp-local-model-[//i//]]
+*** <AE> MN-AE-//X// (Factory Gateway / Trainer)
+**** <CNT> cnt-local-model\n[acpi: acp-local-model-//X//]
 
 @endwbs

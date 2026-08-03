@@ -1,0 +1,74 @@
+@startuml
+title 9.8.5 Subscriptions
+
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+
+skinparam sequence {
+    ArrowColor #333333
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
+}
+
+legend top left
+  X = 1..N (factory index)
+
+  AE  : Application Entity
+  SUB : subscription
+
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
+endlegend
+
+box "Factory X" #EAF2FC
+participant "ADN-AE-X" as ADN
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
+end box
+
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
+end box
+
+
+== sub-sensor-data-X — Local Subscription ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 1. CREATE <SUB>\nsub-sensor-data-X
+    MNCSE --> MNAE : 2. CREATE Response\n2001 CREATED
+end
+
+
+== sub-fl-control-mnX — Cross-CSE Subscription ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 3. CREATE <SUB>\nsub-fl-control-mnX
+    MNCSE -> INCSE : 4. Forward CREATE via Mcc
+    INCSE --> MNCSE : 5. CREATE Response\n2001 CREATED
+    MNCSE --> MNAE : 6. Forward CREATE Response
+end
+
+
+== sub-in-dropbox-mnX — Local Subscription ==
+
+loop for each factory X = 1..N
+    INAE -> INCSE : 7. CREATE <SUB>\nsub-in-dropbox-mnX
+    INCSE --> INAE : 8. CREATE Response\n2001 CREATED
+end
+
+@enduml

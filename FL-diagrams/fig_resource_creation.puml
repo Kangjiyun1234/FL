@@ -1,0 +1,75 @@
+@startuml
+title 9.8.4 Resources Creation
+
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+
+skinparam sequence {
+    ArrowColor #333333
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
+}
+
+legend top left
+  X = 1..N (factory index)
+
+  AE  : Application Entity
+  CNT : container
+
+  Mca : AE-CSE reference point
+endlegend
+
+box "Factory X" #EAF2FC
+participant "ADN-AE-X" as ADN
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
+end box
+
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
+end box
+
+
+== Local Resource Creation on MN-CSE-X ==
+
+loop for each factory X = 1..N
+    ADN -> MNCSE : 1. CREATE <CNT>\ncnt-sensor-data
+    MNCSE --> ADN : 2. CREATE Response\n2001 CREATED
+
+    MNAE -> MNCSE : 3. CREATE <CNT>\ncnt-local-model
+    MNCSE --> MNAE : 4. CREATE Response\n2001 CREATED
+end
+
+
+== FL Management Resource Creation on IN-CSE ==
+
+INAE -> INCSE : 5. CREATE <CNT>\ncnt-fl-control
+INCSE --> INAE : 6. CREATE Response\n2001 CREATED
+
+INAE -> INCSE : 7. CREATE <CNT>\ncnt-global-model
+INCSE --> INAE : 8. CREATE Response\n2001 CREATED
+
+INAE -> INCSE : 9. CREATE <CNT>\ncnt-local-updates
+INCSE --> INAE : 10. CREATE Response\n2001 CREATED
+
+loop for each factory X = 1..N
+    INAE -> INCSE : 11. CREATE <CNT>\ncnt-mnX
+    INCSE --> INAE : 12. CREATE Response\n2001 CREATED
+end
+
+@enduml

@@ -1,5 +1,5 @@
 @startuml
-title 9.8.9 Global Aggregation\nand Updated Model Publication
+title 9.8.8 Global Aggregation\nand Updated Model Publication
 
 hide footbox
 
@@ -18,22 +18,25 @@ skinparam sequence {
     DividerBorderColor #777777
     DividerBackgroundColor white
     DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
     NoteBorderColor #777777
     NoteBackgroundColor #FFFDF5
 }
 
 legend top left
-  i = 1..N (factory index)
+  X = 1..N (factory index)
 
   CIN    : contentInstance
   FedAvg : Federated Averaging
-  Mca    : AE-CSE reference point
-  Mcc    : CSE-CSE reference point
+
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
 endlegend
 
-box "Factory i" #EAF2FC
-participant "MN-AE[i]" as MNAE
-participant "MN-CSE[i]" as MNCSE
+box "Factory X" #EAF2FC
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
 end box
 
 box "Cloud Service Platform" #FFF8E7
@@ -44,101 +47,80 @@ end box
 
 == Local Update Notification Collection ==
 
-loop for each factory dropbox i = 1..N
-    INCSE -> INAE : NOTIFY\nNew local-update <CIN>\nunder cnt-local-updates/cnt-mn[i]
-
-    INAE --> INCSE : NOTIFY Response\n2000 OK
+loop for each factory X = 1..N
+    INCSE -> INAE : 1. NOTIFY local-update arrival\nfrom cnt-mnX
+    INAE --> INCSE : 2. NOTIFY Response\n2000 OK
 end
 
-INAE -> INAE : Wait until the expected update notifications\narrive or the collection deadline is reached
+INAE -> INAE : 3. Wait for expected updates\nor collection deadline
 
 
 == Local Update Retrieval ==
 
-loop for each factory i = 1..N
-    INAE -> INCSE : RETRIEVE\ntarget = IN-AE/cnt-local-updates/cnt-mn[i]/la
-
-    INCSE --> INAE : RETRIEVE Response\nnode\nround\nweightsURI\nchecksum\nnumSamples\naccuracy\ntrainLoss\nvalidationLoss
+loop for each factory X = 1..N
+    INAE -> INCSE : 4. RETRIEVE local-update <CIN>\nfrom cnt-mnX
+    INCSE --> INAE : 5. RETRIEVE Response
 end
 
 
 == Local Update Validation ==
 
-loop for each retrieved local update i = 1..N
-    INAE -> INAE : Validate update metadata\n- type is fl-update\n- round is current round n\n- node is registered MN-AE[i]\n- one update per node\n- weightsURI exists
-
-    INAE -> INAE : Download local weights\nusing weightsURI\nVerify checksum
+loop for each retrieved local update X = 1..N
+    INAE -> INAE : 6. Validate update metadata
+    INAE -> INAE : 7. Download and verify\nlocal weights
 end
 
 
 == Update Anomaly Detection ==
 
-INAE -> INAE : Compare local-update metrics\nand model characteristics\nExclude anomalous updates
+INAE -> INAE : 8. Detect anomalous updates
 
 
 == Global Model Aggregation ==
 
-INAE -> INAE : Apply FedAvg to valid updates\nusing local weights and numSamples
+INAE -> INAE : 9. Apply FedAvg
 
 
 == Updated Global Model Publication ==
 
-INAE -> INAE : Store aggregated global model file\nObtain modelURI, checksum and modelSize
-
-INAE -> INCSE : CREATE <CIN>\nunder IN-AE/cnt-global-model\ncon:\ntype = global-model\nglobalRound = n + 1\nmodelURI\nchecksum\nmodelSize\ntimestamp
-
-INCSE --> INAE : CREATE Response\n2001 CREATED
+INAE -> INAE : 10. Store aggregated global model
+INAE -> INCSE : 11. CREATE global-model <CIN>\nunder cnt-global-model
+INCSE --> INAE : 12. CREATE Response\n2001 CREATED
 
 
 == Next-Round or Completion Command Publication ==
 
-INAE -> INCSE : CREATE <CIN>\nunder IN-AE/cnt-fl-control\ncon:\ntype = fl-command\njobState = START_NEXT_ROUND or FL_COMPLETED\ncompletedRound = n\nnextRound = n + 1 (START_NEXT_ROUND only)\nglobalModelUri = /IN-AE/cnt-global-model/la (START_NEXT_ROUND only)\ntimestamp
-
-INCSE --> INAE : CREATE Response\n2001 CREATED
+INAE -> INCSE : 13. CREATE next-round or\ncompletion command <CIN>
+INCSE --> INAE : 14. CREATE Response\n2001 CREATED
 
 
 == Cross-CSE Command Notification ==
 
-loop for each factory i = 1..N
-    INCSE -> MNCSE : NOTIFY\nNext-round or completion command\nTo: MN-AE[i]\njobState\ncompletedRound\nnextRound (START_NEXT_ROUND only)\nglobalModelUri (START_NEXT_ROUND only)
-
-    MNCSE -> MNAE : Forward NOTIFY via Mca
-
-    MNAE --> MNCSE : NOTIFY Response\n2000 OK
-    MNCSE --> INCSE : Forward NOTIFY Response
+loop for each factory X = 1..N
+    INCSE -> MNCSE : 15. NOTIFY next-round or\ncompletion command
+    MNCSE -> MNAE : 16. Forward NOTIFY via Mca
+    MNAE --> MNCSE : 17. NOTIFY Response\n2000 OK
+    MNCSE --> INCSE : 18. Forward NOTIFY Response
 end
 
 
 == START_NEXT_ROUND Continuation ==
 
 note over MNAE, INAE
-The following sequence represents START_NEXT_ROUND.
-
-When jobState is FL_COMPLETED, processing ends after
-the command notification and no additional model
-retrieval or local training is performed.
+Steps 19 to 25 apply to START_NEXT_ROUND only.
+For FL_COMPLETED, processing ends after Step 18.
 end note
 
-loop for each factory i = 1..N
-    MNAE -> MNCSE : RETRIEVE\ntarget = /IN-AE/cnt-global-model/la
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 19. RETRIEVE updated\nglobal model
+    MNCSE -> INCSE : 20. Forward RETRIEVE via Mcc
+    INCSE --> MNCSE : 21. RETRIEVE Response
+    MNCSE --> MNAE : 22. Forward RETRIEVE Response
 
-    MNCSE -> INCSE : Forward RETRIEVE via Mcc\ntarget = /IN-AE/cnt-global-model/la
+    MNAE -> MNAE : 23. Download and verify\nupdated global model
 
-    INCSE --> MNCSE : RETRIEVE Response\nglobalRound = n + 1\nmodelURI\nchecksum\nmodelSize\ntimestamp
-
-    MNCSE --> MNAE : Forward RETRIEVE Response
-
-    MNAE -> MNAE : Download updated global model\nusing modelURI\nVerify checksum
-
-    MNAE -> MNCSE : CREATE <CIN>\nunder MN-AE[i]/cnt-local-model\ncon:\ntype = global-model-cache\nglobalRound = n + 1\nsourceModelURI\nlocalModelURI\nchecksum\ntimestamp
-
-    MNCSE --> MNAE : CREATE Response\n2001 CREATED
+    MNAE -> MNCSE : 24. CREATE cached-model <CIN>\nunder cnt-local-model
+    MNCSE --> MNAE : 25. CREATE Response\n2001 CREATED
 end
-
-note over MNAE, INAE
-After updating the local cache, each MN-AE[i]
-continues with the local training and upload
-procedure defined in clause 9.8.8.
-end note
 
 @enduml

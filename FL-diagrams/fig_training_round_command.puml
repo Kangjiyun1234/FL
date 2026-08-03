@@ -1,0 +1,81 @@
+@startuml
+title 9.8.6 Training Round Command Creation\nand Global Model Distribution
+
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+
+skinparam sequence {
+    ArrowColor #333333
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
+}
+
+legend top left
+  X = 1..N (factory index)
+
+  CIN : contentInstance
+
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
+endlegend
+
+box "Factory X" #EAF2FC
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
+end box
+
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
+end box
+
+
+== Training Round Command Creation ==
+
+INAE -> INCSE : 1. CREATE round-command <CIN>\nunder cnt-fl-control
+INCSE --> INAE : 2. CREATE Response\n2001 CREATED
+
+
+== Cross-CSE Round Command Notification ==
+
+loop for each factory X = 1..N
+    INCSE -> MNCSE : 3. NOTIFY round command\nTo: MN-AE-X
+    MNCSE -> MNAE : 4. Forward NOTIFY via Mca
+    MNAE --> MNCSE : 5. NOTIFY Response\n2000 OK
+    MNCSE --> INCSE : 6. Forward NOTIFY Response
+end
+
+
+== Global Model Metadata Retrieval ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 7. RETRIEVE global model metadata
+    MNCSE -> INCSE : 8. Forward RETRIEVE via Mcc
+    INCSE --> MNCSE : 9. RETRIEVE Response
+    MNCSE --> MNAE : 10. Forward RETRIEVE Response
+end
+
+
+== Global Model Download and Local Cache ==
+
+loop for each factory X = 1..N
+    MNAE -> MNAE : 11. Download and verify\nglobal model
+    MNAE -> MNCSE : 12. CREATE cached-model <CIN>\nunder cnt-local-model
+    MNCSE --> MNAE : 13. CREATE Response\n2001 CREATED
+end
+
+@enduml

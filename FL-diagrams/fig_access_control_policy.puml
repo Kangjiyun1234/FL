@@ -1,0 +1,71 @@
+@startuml
+title 9.8.3 Access Control Policy
+
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+
+skinparam sequence {
+    ArrowColor #333333
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
+}
+
+legend top left
+  X = 1..N (factory index)
+
+  AE  : Application Entity
+  ACP : accessControlPolicy
+
+  Mca : AE-CSE reference point
+endlegend
+
+box "Factory X" #EAF2FC
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
+end box
+
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
+end box
+
+
+== ACP Configuration on IN-CSE ==
+
+INAE -> INCSE : 1. CREATE <ACP>\nacp-fl-control
+INCSE --> INAE : 2. CREATE Response\n2001 CREATED
+
+INAE -> INCSE : 3. CREATE <ACP>\nacp-global-model
+INCSE --> INAE : 4. CREATE Response\n2001 CREATED
+
+loop for each factory X = 1..N
+    INAE -> INCSE : 5. CREATE <ACP>\nacp-local-update-mnX
+    INCSE --> INAE : 6. CREATE Response\n2001 CREATED
+end
+
+
+== ACP Configuration on MN-CSE-X ==
+
+loop for each factory X = 1..N
+    MNAE -> MNCSE : 7. CREATE <ACP>\nacp-sensor-data-X
+    MNCSE --> MNAE : 8. CREATE Response\n2001 CREATED
+
+    MNAE -> MNCSE : 9. CREATE <ACP>\nacp-local-model-X
+    MNCSE --> MNAE : 10. CREATE Response\n2001 CREATED
+end
+
+@enduml

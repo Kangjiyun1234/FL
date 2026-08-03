@@ -1,0 +1,75 @@
+@startuml
+title 9.8.2 Registrations
+
+hide footbox
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+
+skinparam sequence {
+    ArrowColor #333333
+    LifeLineBorderColor #555555
+    LifeLineBackgroundColor white
+    ParticipantBorderColor #333333
+    ParticipantBackgroundColor white
+    ParticipantFontStyle bold
+    DividerBorderColor #777777
+    DividerBackgroundColor white
+    DividerFontStyle bold
+    GroupBorderColor #777777
+    GroupBackgroundColor white
+    NoteBorderColor #777777
+    NoteBackgroundColor #FFFDF5
+}
+
+legend top left
+  X = 1..N (factory index)
+
+  AE  : Application Entity
+  CSR : remoteCSE
+
+  Mca : AE-CSE reference point
+  Mcc : CSE-CSE reference point
+endlegend
+
+box "Factory X" #EAF2FC
+participant "ADN-AE-X" as ADN
+participant "MN-AE-X" as MNAE
+participant "MN-CSE-X" as MNCSE
+end box
+
+box "Cloud Service Platform" #FFF8E7
+participant "IN-CSE" as INCSE
+participant "IN-AE" as INAE
+end box
+
+
+== MN-CSE Registration ==
+
+loop for each factory X = 1..N
+    MNCSE -> INCSE : 1. CREATE <remoteCSE>\nMN-CSE-X registration via Mcc
+    INCSE --> MNCSE : 2. CREATE Response\n2001 CREATED
+
+    MNCSE -> INCSE : 3. RETRIEVE <CSEBase>\nIN-CSE information
+    INCSE --> MNCSE : 4. RETRIEVE Response
+
+    MNCSE -> MNCSE : 5. Create counterpart <remoteCSE>\nrepresenting IN-CSE locally
+end
+
+
+== Application Entity Registrations ==
+
+loop for each factory X = 1..N
+    ADN -> MNCSE : 6. CREATE <AE>\nADN-AE-X via Mca
+    MNCSE --> ADN : 7. CREATE Response\n2001 CREATED
+
+    MNAE -> MNCSE : 8. CREATE <AE>\nMN-AE-X via Mca
+    MNCSE --> MNAE : 9. CREATE Response\n2001 CREATED
+end
+
+INAE -> INCSE : 10. CREATE <AE>\nIN-AE via Mca
+INCSE --> INAE : 11. CREATE Response\n2001 CREATED
+
+@enduml
