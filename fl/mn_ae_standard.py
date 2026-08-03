@@ -9,7 +9,6 @@ FEMTO PRONOSTIA Bearing 데이터셋용
 - val_acc → val_auroc (재구성 오차 기반 AUROC)
 """
 import sys
-sys.path.append('/home/eunjin/federated-learning/fl')
 
 import os
 import time

@@ -15,7 +15,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-sys.path.append('/home/eunjin/federated-learning/fl')
 from model import Conv1DAE
 import config
 

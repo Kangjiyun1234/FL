@@ -11,7 +11,6 @@ Usage:
   python3 personalize.py --epochs 20 --lr 1e-4
 """
 import sys
-sys.path.append('/home/eunjin/federated-learning/fl')
 
 import os
 import argparse

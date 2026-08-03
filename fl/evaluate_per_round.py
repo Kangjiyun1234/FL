@@ -22,7 +22,6 @@ import pickle
 import numpy as np
 import torch
 
-sys.path.append('/home/eunjin/federated-learning/fl')
 from model import Conv1DAE
 import config
 

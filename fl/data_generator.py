@@ -17,8 +17,6 @@ import json
 import time
 import shutil
 
-sys.path.append('/home/eunjin/federated-learning/fl')
-
 import config
 import onem2m_utils as om2m
 

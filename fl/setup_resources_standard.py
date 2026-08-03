@@ -16,7 +16,6 @@ Usage:
   python3 setup_resources_standard.py --clean   # DB 초기화 후 리소스 생성
 """
 import sys
-sys.path.append('/home/eunjin/federated-learning/fl')
 
 import time
 import subprocess
