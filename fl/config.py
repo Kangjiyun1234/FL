@@ -1,12 +1,17 @@
 """
 fl/config.py — FL + oneM2M 통합 설정
 FEMTO PRONOSTIA Bearing 데이터셋 (Raw Signal AE 버전)
-- 3 edge 노드 (mn1=Condition1/1800rpm, mn2=Condition2/1650rpm, mn3=Condition3/1500rpm)
-- Conv1DAE 기반 anomaly detection (정상만 학습)
+
+- 3 edge 노드
+  - mn1: Condition 1 / 1800 rpm
+  - mn2: Condition 2 / 1650 rpm
+  - mn3: Condition 3 / 1500 rpm
+- Conv1DAE 기반 anomaly detection
+- 정상 데이터만 사용해 Autoencoder 학습
 """
+
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 
 # ════════════════════════════════════════════════════════
@@ -15,9 +20,14 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class AEConfig:
-    seq_len:    int   = 2560    # vibration: 25.6kHz × 0.1sec (FEMTO PRONOSTIA)
-    n_channels: int   = 1       # 진동 1채널
-    latent_dim: int   = 32      # AE 병목 차원
+    # vibration: 25.6 kHz × 0.1 sec
+    seq_len: int = 2560
+
+    # 현재는 수평 진동 1채널 사용
+    n_channels: int = 1
+
+    # Autoencoder 병목 차원
+    latent_dim: int = 32
 
 
 # ════════════════════════════════════════════════════════
@@ -26,24 +36,30 @@ class AEConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    rounds:       int   = 10
-    local_epochs: int   = 10
-    batch_size:   int   = 32
-    lr:           float = 1e-3
+    rounds: int = 10
+    local_epochs: int = 10
+    batch_size: int = 32
+    lr: float = 1e-3
     weight_decay: float = 1e-4
-    device:       str   = "cpu"
-    seed:         int   = 42
-    log_every:    int   = 1
-    train_split:  float = 0.8    # 레거시 필드 (AEEdgeNode에서는 미사용)
-    hidden_size:  int   = 128    # 레거시 필드
-    num_classes:  int   = 2      # 레거시 필드
+    device: str = "cpu"
+    seed: int = 42
+    log_every: int = 1
+
+    # 레거시 필드
+    train_split: float = 0.8
+    hidden_size: int = 128
+    num_classes: int = 2
 
 
 # ════════════════════════════════════════════════════════
 # 데이터 설정
 # ════════════════════════════════════════════════════════
 
-FEMTO_DATA_DIR = "/tmp/fl_data/femto"
+# 환경변수로 다른 PKL 디렉터리를 지정할 수 있다.
+FEMTO_DATA_DIR = os.getenv(
+    "FL_PKL_DIR",
+    "/tmp/fl_data/femto",
+)
 
 NODE_DATA_FILES = {
     "mn1": os.path.join(FEMTO_DATA_DIR, "mn1.pkl"),
@@ -51,66 +67,137 @@ NODE_DATA_FILES = {
     "mn3": os.path.join(FEMTO_DATA_DIR, "mn3.pkl"),
 }
 
-CLASS_NAMES  = ["정상", "이상"]
-NUM_CLASSES  = 2
+CLASS_NAMES = ["정상", "이상"]
+NUM_CLASSES = 2
 
-RMS_FAULT_THRESHOLD = 1.0    # g — first file exceeding this RMS = fault onset
+# RMS가 처음 이 값을 초과한 파일을 fault onset으로 사용
+RMS_FAULT_THRESHOLD = 1.0
 
 
 # ════════════════════════════════════════════════════════
 # Anomaly Detection 설정
 # ════════════════════════════════════════════════════════
 
-# 탐지 결정: 재구성 오차가 threshold를 K회 연속 초과하면 alarm
+# 재구성 오차가 threshold를 연속 K회 초과하면 fault 판정
 ANOMALY_K_CONSECUTIVE = 3
 
-# threshold 결정 방법: val 정상 데이터 MSE 의 N 표준편차 위
+# threshold = 정상 validation MSE 평균 + N × 표준편차
 THRESHOLD_N_SIGMA = 3.0
+
+# 데모에서 이상 상태를 표시할 노드
+ANOMALY_DEMO_NODE = os.getenv(
+    "FL_ANOMALY_DEMO_NODE",
+    "mn3",
+)
+
+# MN3는 기본적으로 Round 7부터 이상 샘플을 표시한다.
+ANOMALY_START_ROUND = int(
+    os.getenv(
+        "FL_ANOMALY_START_ROUND",
+        "7",
+    )
+)
 
 
 # ════════════════════════════════════════════════════════
 # oneM2M 연결 설정
 # ════════════════════════════════════════════════════════
 
-BASE_URL    = "http://127.0.0.1:3000"
-CSE_NAME    = "TinyIoT"
-MN_AE_NAME  = "MN-AE-1"
-IN_AE_NAME  = "IN-AE"
-NOTIFY_HOST = "127.0.0.1"
+BASE_URL = os.getenv(
+    "TINYIOT_BASE_URL",
+    "http://127.0.0.1:3000",
+)
 
-NUM_CLIENTS   = 3
-GLOBAL_ROUNDS = 10    # TRAIN_CFG.rounds 와 동일하게 유지
+CSE_NAME = os.getenv(
+    "TINYIOT_CSE_NAME",
+    "TinyIoT",
+)
+
+MN_AE_NAME = "MN-AE-1"
+IN_AE_NAME = "IN-AE"
+
+NOTIFY_HOST = os.getenv(
+    "FL_NOTIFY_HOST",
+    "127.0.0.1",
+)
+
+NUM_CLIENTS = 3
+GLOBAL_ROUNDS = 10
 
 ORIGINATOR = "CAdmin"
+
 HEADERS = {
     "X-M2M-Origin": ORIGINATOR,
-    "X-M2M-RVI":    "2a",
+    "X-M2M-RVI": "2a",
     "Content-Type": "application/json;ty=4",
-    "Accept":       "application/json",
+    "Accept": "application/json",
 }
+
 
 # ════════════════════════════════════════════════════════
 # 모델 저장 경로
 # ════════════════════════════════════════════════════════
 
-MODEL_BASE_DIR   = "/tmp/fl_models"
-LOCAL_MODEL_DIR  = os.path.join(MODEL_BASE_DIR, "local")
-GLOBAL_MODEL_DIR = os.path.join(MODEL_BASE_DIR, "global")
+MODEL_BASE_DIR = os.getenv(
+    "FL_MODEL_BASE_DIR",
+    "/tmp/fl_models",
+)
 
-os.makedirs(LOCAL_MODEL_DIR,  exist_ok=True)
-os.makedirs(GLOBAL_MODEL_DIR, exist_ok=True)
+LOCAL_MODEL_DIR = os.path.join(
+    MODEL_BASE_DIR,
+    "local",
+)
+
+GLOBAL_MODEL_DIR = os.path.join(
+    MODEL_BASE_DIR,
+    "global",
+)
+
+CACHE_MODEL_DIR = os.path.join(
+    MODEL_BASE_DIR,
+    "cache",
+)
+
+# clean_fl.sh가 새로운 데모 실행마다 이 파일의 수정 시각을 갱신한다.
+#
+# Dashboard는 이 시각보다 오래된 global_round*.pt 파일을
+# 이전 실행에서 남은 stale model로 판단하고 사용하지 않는다.
+DEMO_RUN_MARKER = os.getenv(
+    "FL_DEMO_RUN_MARKER",
+    os.path.join(
+        MODEL_BASE_DIR,
+        ".demo_run_started",
+    ),
+)
+
+os.makedirs(
+    LOCAL_MODEL_DIR,
+    exist_ok=True,
+)
+
+os.makedirs(
+    GLOBAL_MODEL_DIR,
+    exist_ok=True,
+)
+
+os.makedirs(
+    CACHE_MODEL_DIR,
+    exist_ok=True,
+)
+
 
 # ════════════════════════════════════════════════════════
 # DP-SGD 설정
 # ════════════════════════════════════════════════════════
 
-DP_EPSILON       = 12.0
-DP_DELTA         = 5e-4
+DP_EPSILON = 12.0
+DP_DELTA = 5e-4
 DP_MAX_GRAD_NORM = 1.5
 
+
 # ════════════════════════════════════════════════════════
-# 인스턴스
+# 설정 인스턴스
 # ════════════════════════════════════════════════════════
 
 TRAIN_CFG = TrainConfig()
-AE_CFG    = AEConfig()
+AE_CFG = AEConfig()
