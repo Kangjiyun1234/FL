@@ -12,8 +12,8 @@ fl/dashboard_server.py — FL 대시보드 백엔드
 2. score-stream
    - 테스트 샘플의 재구성 오차를 SSE로 전송
    - score_idx는 글로벌 모델이 갱신돼도 유지
-   - MN3는 설정된 라운드 전에는 정상 데이터만 표시
-   - 설정된 라운드부터 이상 데이터만 표시
+   - MN3는 PKL의 test_stream 순서를 그대로 표시
+   - NORMAL → TRANSITION → FAULT
 
 SSE 이벤트:
 
