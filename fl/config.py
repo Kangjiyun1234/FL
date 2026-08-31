@@ -82,7 +82,7 @@ RMS_FAULT_THRESHOLD = 1.0
 ANOMALY_K_CONSECUTIVE = 3
 
 # threshold = 정상 validation MSE 평균 + N × 표준편차
-THRESHOLD_N_SIGMA = 3.0
+THRESHOLD_N_SIGMA = 4.0
 
 # Isaac Sim 버전에서는 test_stream의 실제 시간 순서를 그대로 사용한다.
 # 따라서 특정 FL Round부터 anomaly를 강제로 표시하는 설정은 사용하지 않는다.

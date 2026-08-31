@@ -310,7 +310,7 @@
     </div>
     <div class="summary-grid" id="summary-grid"></div>
     <div class="summary-footer">
-      Threshold = val normal MSE μ + 3σ &nbsp;·&nbsp; Detection: K=3 consecutive exceedances
+      Threshold = val normal MSE μ + 4σ &nbsp;·&nbsp; Detection: K=3 consecutive exceedances
     </div>
   </div>
 </div>
@@ -887,6 +887,7 @@ function handleSummary(evt) {
     card.className = 'summary-node-card';
 
     let roleTag;
+
     if (node === 'mn1') {
       roleTag =
         `<span style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
@@ -903,7 +904,7 @@ function handleSummary(evt) {
           Progressive Fault
         </span>`;
     }
-    
+
     let rows = `
       <div class="summary-node-name">${node} ${roleTag}</div>
       <div class="summary-row">
@@ -985,11 +986,12 @@ function connect() {
     if (evt.type === 'init' || evt.type === 'round') {
       applyState(evt);
     } else if (evt.type === 'threshold') {
+
       applyThresholds(evt.thresholds || {});
 
-      // 모델이 변경되어 threshold가 바뀌었으므로
-      // 연속 초과 카운트만 다시 시작.
-      // stream 위치와 fault onset은 유지한다.
+      // 모델이 변경되어 threshold가 바뀌어도
+      // stream 위치와 fault onset은 유지하고,
+      // 연속 초과 카운트만 새 threshold 기준으로 초기화한다.
       mn3Consec = 0;
     } else if (evt.type === 'score') {
       handleScore(evt);
