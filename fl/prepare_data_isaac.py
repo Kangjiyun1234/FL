@@ -535,7 +535,7 @@ def process_mn2(t, signal, progress, rng):
         signal,
         progress,
         TRIM_START_SEC,
-        120.0,
+        90.0,
         TRAIN_STRIDE,
     )
 
