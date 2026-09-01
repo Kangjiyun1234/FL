@@ -1110,6 +1110,64 @@ def _poll_thread() -> None:
 
                 nodes: dict = {}
 
+                # clean_fl.sh 이후에도 TinyIoT / 브라우저 쪽에
+                # 이전 데모의 FL_COMPLETED control CIN이 남아 보이는 경우가 있다.
+                # 현재 실행에서 생성된 final global model이 없으면 stale 완료 상태로 보고 무시한다.
+                if fl_state == "FL_COMPLETED":
+                    latest_model_round, latest_model_path = _find_latest_model(
+                        max_round=round_number,
+                    )
+
+                    if (
+                        latest_model_path is None
+                        or latest_model_round < max_rounds
+                    ):
+                        ready_snapshot = {
+                            "fl_state": "FL_READY",
+                            "round": 0,
+                            "max_rounds": config.GLOBAL_ROUNDS,
+                            "nodes": {},
+                        }
+
+                        if ready_snapshot != previous_snapshot:
+                            previous_snapshot = ready_snapshot
+
+                            with _shared_lock:
+                                _shared.update(
+                                    {
+                                        "fl_state": "FL_READY",
+                                        "round": 0,
+                                        "max_rounds": config.GLOBAL_ROUNDS,
+                                        "nodes": {},
+                                        "thresholds": {},
+                                        "scores": {},
+                                        "labels": {},
+                                        "score_idx": 0,
+                                        "model_round": -1,
+                                        "summary_sent": False,
+                                    }
+                                )
+
+                            _broadcast(
+                                {
+                                    "type": "round",
+                                    "fl_state": "FL_READY",
+                                    "round": 0,
+                                    "max_rounds": config.GLOBAL_ROUNDS,
+                                    "nodes": {},
+                                }
+                            )
+
+                        print(
+                            "  [Poll] stale FL_COMPLETED ignored "
+                            "(no current-run final global model)"
+                        )
+
+                        time.sleep(
+                            POLL_INTERVAL,
+                        )
+                        continue
+
                 for node in NODES:
                     node_content = (
                         _parse_content_instance(

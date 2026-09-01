@@ -393,33 +393,45 @@ class INAECoordinator:
         return []
 
     def _prepare_dropbox(self):
-        print("\n  Prepare drop-box containers (delete & recreate to clear old CINs)...")
-        dropbox_path = f"{config.CSE_NAME}/{config.IN_AE_NAME}/cnt-local-updates"
+        print("\n  Prepare drop-box containers (reuse clean_fl resources)...")
 
-        # 삭제 전 ACP 정보 저장
-        root_acpi = self._read_acpi(dropbox_path)
-        node_acpis = {
-            node: self._read_acpi(f"{self.dropbox_root}/cnt-{node}")
-            for node in self.node_names
-        }
+        root_path = self.dropbox_root
 
-        om2m.delete_resource(dropbox_path)
-        om2m.create_container(f"{config.CSE_NAME}/{config.IN_AE_NAME}", "cnt-local-updates",
-                              mni=5000, mbs=50_000_000)
-        if root_acpi:
-            om2m.update_acpi(dropbox_path, root_acpi)
+        if not om2m.get_resource(root_path):
+            print(f"    ⚠ missing root, create: {root_path}")
+            om2m.create_container(
+                f"{config.CSE_NAME}/{config.IN_AE_NAME}",
+                "cnt-local-updates",
+                mni=5000,
+                mbs=50_000_000,
+            )
+
+        if not om2m.get_resource(root_path):
+            print(f"    ✗ drop-box root missing: {root_path}")
+            return False
+
+        print(f"    ✓ {root_path}")
 
         for node in self.node_names:
-            parent = self.dropbox_root
-            om2m.delete_resource(f"{parent}/cnt-{node}")
-            time.sleep(0.5)
-            om2m.create_container(parent, f"cnt-{node}", mni=2000, mbs=20_000_000)
-            if node_acpis[node]:
-                om2m.update_acpi(f"{parent}/cnt-{node}", node_acpis[node])
-            print(f"    ✓ {parent}/cnt-{node}")
+            node_path = f"{root_path}/cnt-{node}"
 
-        # TinyIoT DB가 컨테이너 생성을 완전히 커밋할 시간 확보
-        time.sleep(2.0)
+            if not om2m.get_resource(node_path):
+                print(f"    ⚠ missing node dropbox, create: {node_path}")
+                om2m.create_container(
+                    root_path,
+                    f"cnt-{node}",
+                    mni=2000,
+                    mbs=20_000_000,
+                )
+
+            if not om2m.get_resource(node_path):
+                print(f"    ✗ node dropbox missing: {node_path}")
+                return False
+
+            print(f"    ✓ {node_path}")
+
+        time.sleep(1.0)
+        return True
 
     def _subscribe_dropbox(self):
         print("\n  Subscribe drop-box per-node containers (net=3 CIN create)...")

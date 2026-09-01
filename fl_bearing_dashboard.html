@@ -347,8 +347,8 @@
           <span class="node-name">mn2</span>
           <span class="node-badge ok" id="nb-mn2">Normal</span>
         </div>
-        <div class="node-role">Intermittent Anomaly · 1800 rpm</div>
-        <div class="node-stat" id="ns-mn2">Isaac Sim · sparse impulse</div>
+        <div class="node-role">Normal Reference · 1650 rpm</div>
+        <div class="node-stat" id="ns-mn2">Isaac Sim · normal support</div>
       </div>
       <div class="node ok" id="nd-mn3">
         <div class="node-header">
@@ -519,7 +519,7 @@ function mkLossChart() {
 
 const C = {
   mn1:  mkNodeChart('c-mn1', '#378add'),
-  mn2:  mkNodeChart('c-mn2', '#7f77dd'),
+  mn2:  mkNodeChart('c-mn2', '#378add'),
   mn3:  mkNodeChart('c-mn3', '#378add'),
   loss: mkLossChart(),
 };
@@ -894,11 +894,11 @@ function handleSummary(evt) {
           Normal Reference
         </span>`;
     } else if (node === 'mn2') {
-      roleTag =
-        `<span style="font-size:10px;color:var(--tr-bar);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
-          Intermittent Anomaly
-        </span>`;
-    } else {
+        roleTag =
+          `<span style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
+            Normal Reference
+          </span>`;
+      } else {
       roleTag =
         `<span style="font-size:10px;color:var(--fd-bar);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
           Progressive Fault

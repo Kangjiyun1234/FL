@@ -35,55 +35,50 @@ BACKUP_ROOT = Path(
 )
 
 SIGNAL_COL = os.getenv("ISAAC_SIGNAL_COL", "accel_y")
+REQUIRED_COLUMNS = {"time","fault_progress",SIGNAL_COL,}
 
 TARGET_FS = 25_600
 SEQ_LEN = 2_560
 TRAIN_STRIDE = 1_280       # 50% overlap
 EVAL_STRIDE = 2_560        # non-overlap
 TRIM_START_SEC = 0.5
-TEST_STREAM_MAX = 160
+TEST_STREAM_MAX = 800
 SEED = 42
 
-MN3_NORMAL_END = 20.0
-MN3_FAULT_START = 40.0
+MN3_NORMAL_END = 90.0
+MN3_FAULT_START = 140.0
 
-# MN2: 정상 분포는 유지하되 MN1과 너무 똑같지 않도록 약한 차이 추가
-MN2_BASE_GAIN = 1.06
-MN2_MOD_DEPTH = 0.04
+# MN2는 기존 FEMTO 방식처럼 normal support node로 사용한다.
+# Isaac v4에서 이미 MN2 raw 조건을 mn1과 다르게 만들었으므로,
+# 후처리에서 test anomaly를 추가하지 않는다.
+MN2_BASE_GAIN = 1.00
+MN2_MOD_DEPTH = 0.00
 MN2_MOD_HZ = 1.2
-MN2_NOISE_STD_RATIO = 0.05
-MN2_TEST_ANOMALY_COUNT = 10
-MN2_IMPULSE_MIN_SIGMA = 3.5
-MN2_IMPULSE_MAX_SIGMA = 5.5
+MN2_NOISE_STD_RATIO = 0.00
 
-# MN3: 기존 90 Hz / 최대 약 6 sigma가 너무 크고 평평해지는 문제 완화
-FAULT_IMPACT_HZ = 55.0
+# MN3는 점진 상승이 아니라 burst / impact 형태로 만든다.
 FAULT_RESONANCE_HZ = 2_500.0
 FAULT_RINGDOWN_SEC = 0.025
 FAULT_DECAY = 220.0
-MN3_RINGDOWN_BASE_SIGMA = 0.8
-MN3_RINGDOWN_GROWTH_SIGMA = 2.0   # p=1일 때 기본 최대 약 2.8 sigma
-MN3_EVENT_INTERVAL_JITTER = 0.20
-MN3_EVENT_AMPLITUDE_MIN = 0.70
-MN3_EVENT_AMPLITUDE_MAX = 1.15
-MN3_EVENT_SKIP_PROB = 0.12
 
-REQUIRED_COLUMNS = {
-    "time",
-    "state",
-    "fault_progress",
-    "accel_x",
-    "accel_y",
-    "accel_z",
-    "gyro_x",
-    "gyro_y",
-    "gyro_z",
-}
+# transition 구간: 가끔 약하게 튐
+TRANSITION_EVENT_HZ = 6.0
+TRANSITION_EVENT_PROB = 0.25
+TRANSITION_IMPULSE_MIN_SIGMA = 0.8
+TRANSITION_IMPULSE_MAX_SIGMA = 1.5
+
+# fault 구간: 더 자주, 더 강하게 튐
+FAULT_EVENT_HZ = 26.0
+FAULT_EVENT_PROB = 0.80
+FAULT_IMPULSE_MIN_SIGMA = 2.5
+FAULT_IMPULSE_MAX_SIGMA = 4.5
+
+EVENT_INTERVAL_JITTER = 0.35
 
 NODE_ROLES = {
-    "mn1": "normal_reference",
-    "mn2": "intermittent_anomaly",
-    "mn3": "progressive_fault",
+    "mn1": "normal_support",
+    "mn2": "normal_support",
+    "mn3": "fault_transition",
 }
 
 
@@ -186,62 +181,84 @@ def ringdown_template(amplitude, rng):
     ).astype(np.float32)
 
 
-def add_progressive_fault_component(signal, progress, rng):
+def add_bursty_fault_component(t, signal, progress, rng):
     """
-    MN3:
-    - Isaac 저주파 신호 보존
-    - fault_progress에 따라 고주파 ring-down 증가
-    - 고장 후반에도 pulse 간격/진폭을 랜덤하게 만들어 plateau 완화
+    MN3 후처리:
+    - transition 구간에서는 가끔 약한 impulse만 추가
+    - fault 구간에서는 불규칙한 burst / ring-down impulse 추가
+    - fault_progress를 진폭 ramp가 아니라 event 발생 강도/확률 조절에 사용
     """
     out = signal.astype(np.float32, copy=True)
 
-    normal_part = signal[progress <= 1e-6]
+    normal_part = signal[t < MN3_NORMAL_END]
     sigma = max(
         float(np.std(normal_part if len(normal_part) else signal)),
         1e-6,
     )
 
-    base_interval = max(
-        1,
-        int(TARGET_FS / FAULT_IMPACT_HZ),
-    )
+    idx = 0
+    while idx < len(out):
+        current_t = float(t[idx])
+        p = float(progress[idx])
 
-    start = 0
+        if current_t < MN3_NORMAL_END:
+            event_hz = None
+            prob = 0.0
+            amp_min = 0.0
+            amp_max = 0.0
 
-    while start < len(out):
-        p = float(progress[start])
+        elif current_t < MN3_FAULT_START:
+            # 20~40초: transition
+            # label은 0으로 유지하되, 약한 튐만 가끔 발생
+            event_hz = TRANSITION_EVENT_HZ
+            prob = TRANSITION_EVENT_PROB * max(p, 0.05)
+            amp_min = TRANSITION_IMPULSE_MIN_SIGMA
+            amp_max = TRANSITION_IMPULSE_MAX_SIGMA
 
-        if p > 0.0 and rng.random() >= MN3_EVENT_SKIP_PROB:
-            local_scale = float(
+        else:
+            # 40초 이후: fault
+            # 점진 상승이 아니라 불규칙한 강한 충격 발생
+            event_hz = FAULT_EVENT_HZ
+            prob = FAULT_EVENT_PROB
+            amp_min = FAULT_IMPULSE_MIN_SIGMA
+            amp_max = FAULT_IMPULSE_MAX_SIGMA
+
+        if event_hz is None:
+            idx += int(TARGET_FS * 0.05)
+            continue
+
+        if rng.random() < prob:
+            amplitude = sigma * float(
                 rng.uniform(
-                    MN3_EVENT_AMPLITUDE_MIN,
-                    MN3_EVENT_AMPLITUDE_MAX,
+                    amp_min,
+                    amp_max,
                 )
             )
 
-            # p=1에서 기본 약 2.8 sigma, local_scale까지 포함해도
-            # 이전의 6 sigma보다 훨씬 낮고 매 이벤트마다 달라진다.
-            amplitude = (
-                sigma
-                * p
-                * (
-                    MN3_RINGDOWN_BASE_SIGMA
-                    + MN3_RINGDOWN_GROWTH_SIGMA * p
-                )
-                * local_scale
+            ring = ringdown_template(
+                amplitude,
+                rng,
             )
 
-            ring = ringdown_template(amplitude, rng)
-            end = min(len(out), start + len(ring))
-            out[start:end] += ring[: end - start]
+            end = min(
+                len(out),
+                idx + len(ring),
+            )
 
+            out[idx:end] += ring[: end - idx]
+
+        base_interval = int(TARGET_FS / event_hz)
         jitter = float(
             rng.uniform(
-                1.0 - MN3_EVENT_INTERVAL_JITTER,
-                1.0 + MN3_EVENT_INTERVAL_JITTER,
+                1.0 - EVENT_INTERVAL_JITTER,
+                1.0 + EVENT_INTERVAL_JITTER,
             )
         )
-        start += max(1, int(base_interval * jitter))
+
+        idx += max(
+            1,
+            int(base_interval * jitter),
+        )
 
     return out
 
@@ -454,7 +471,7 @@ def process_mn1(t, signal, progress, rng):
         signal,
         progress,
         TRIM_START_SEC,
-        36.0,
+        90.0,
         TRAIN_STRIDE,
     )
 
@@ -462,8 +479,8 @@ def process_mn1(t, signal, progress, rng):
         t,
         signal,
         progress,
-        36.0,
-        48.0,
+        90.0,
+        100.0,
         EVAL_STRIDE,
     )
 
@@ -471,8 +488,8 @@ def process_mn1(t, signal, progress, rng):
         t,
         signal,
         progress,
-        48.0,
-        60.0,
+        100.0,
+        180.0,
         EVAL_STRIDE,
     )
 
@@ -484,7 +501,10 @@ def process_mn1(t, signal, progress, rng):
         strength_max=5.0,
     )
 
-    test_labels = np.zeros(len(test), np.int64)
+    test_labels = np.zeros(
+        len(test),
+        np.int64,
+    )
 
     return (
         train,
@@ -498,15 +518,24 @@ def process_mn1(t, signal, progress, rng):
 
 
 def process_mn2(t, signal, progress, rng):
-    # 같은 정상 운전조건이지만 후처리에서 baseline 자체도 약간 다르게 만든다.
-    signal = make_mn2_variant(t, signal, rng)
+    """
+    MN2:
+    - normal support node
+    - Isaac v5에서 이미 mn1과 다른 rpm/load 조건으로 생성됨
+    - test stream에는 인위적인 anomaly를 넣지 않는다.
+    """
+    signal = make_mn2_variant(
+        t,
+        signal,
+        rng,
+    )
 
     train, _, _ = window_range(
         t,
         signal,
         progress,
         TRIM_START_SEC,
-        36.0,
+        120.0,
         TRAIN_STRIDE,
     )
 
@@ -514,31 +543,31 @@ def process_mn2(t, signal, progress, rng):
         t,
         signal,
         progress,
-        36.0,
-        48.0,
+        90.0,
+        100.0,
         EVAL_STRIDE,
     )
 
-    test_normal, test_times, test_progress = window_range(
+    test, test_times, test_progress = window_range(
         t,
         signal,
         progress,
-        48.0,
-        60.0,
+        100.0,
+        180.0,
         EVAL_STRIDE,
     )
 
     val, val_labels = build_synthetic_val(
         val_normal,
         rng,
-        anomaly_ratio=0.6,
+        anomaly_ratio=0.5,
         strength_min=4.0,
-        strength_max=5.5,
+        strength_max=5.0,
     )
 
-    test, test_labels = inject_sparse_test_anomalies(
-        test_normal,
-        rng,
+    test_labels = np.zeros(
+        len(test),
+        np.int64,
     )
 
     return (
@@ -553,21 +582,26 @@ def process_mn2(t, signal, progress, rng):
 
 
 def process_mn3(t, signal, progress, rng):
-    hybrid = add_progressive_fault_component(
+    """
+    MN3:
+    - 0~90초: NORMAL
+    - 90~140초: TRANSITION, label 0
+    - 140초 이후: FAULT, label 1
+    - Dashboard stream은 40~180초를 사용해서 너무 빨리 압축되지 않게 한다.
+    """
+    hybrid = add_bursty_fault_component(
+        t,
         signal,
         progress,
         rng,
     )
 
-    # v3 수정:
-    # test stream을 10초부터 시작하되 train/val과 겹치지 않게 분할한다.
-    # 0.5~8.0 train / 8~10 normal val / 10~50 test / 50~52 fault val
     train, _, _ = window_range(
         t,
         hybrid,
         progress,
         TRIM_START_SEC,
-        8.0,
+        70.0,
         TRAIN_STRIDE,
     )
 
@@ -575,8 +609,8 @@ def process_mn3(t, signal, progress, rng):
         t,
         hybrid,
         progress,
-        8.0,
-        10.0,
+        70.0,
+        85.0,
         EVAL_STRIDE,
     )
 
@@ -584,8 +618,8 @@ def process_mn3(t, signal, progress, rng):
         t,
         hybrid,
         progress,
-        50.0,
-        52.0,
+        150.0,
+        175.0,
         EVAL_STRIDE,
     )
 
@@ -593,28 +627,34 @@ def process_mn3(t, signal, progress, rng):
         [val_normal, val_anomaly],
         axis=0,
     )
+
     val_labels = np.concatenate([
         np.zeros(len(val_normal), np.int64),
         np.ones(len(val_anomaly), np.int64),
     ])
 
-    order = rng.permutation(len(val))
+    order = rng.permutation(
+        len(val),
+    )
+
     val = val[order]
     val_labels = val_labels[order]
 
-    # 10~20 NORMAL -> 20~40 TRANSITION -> 40~50 FAULT
+    # Dashboard stream:
+    # 40~90초   NORMAL
+    # 90~140초  TRANSITION, label 0
+    # 140~180초 FAULT, label 1
     test, test_times, test_progress = window_range(
         t,
         hybrid,
         progress,
-        10.0,
-        50.0,
+        40.0,
+        180.0,
         EVAL_STRIDE,
     )
 
-    # transition 시작부터 anomaly onset
     test_labels = (
-        test_progress > 1e-6
+        test_times >= MN3_FAULT_START
     ).astype(np.int64)
 
     return (
