@@ -310,7 +310,7 @@
     </div>
     <div class="summary-grid" id="summary-grid"></div>
     <div class="summary-footer">
-      Threshold = val normal MSE μ + 3σ &nbsp;·&nbsp; Detection: K=3 consecutive exceedances
+      Threshold = val normal MSE μ + 4σ &nbsp;·&nbsp; Detection: K=3 consecutive exceedances
     </div>
   </div>
 </div>
@@ -321,7 +321,7 @@
   <div class="topbar">
     <div>
       <div class="logo-title">Bearing Fault Detection</div>
-      <div class="logo-sub">Federated Learning · oneM2M · Conv1DAE</div>
+      <div class="logo-sub">Federated Learning · oneM2M · Conv1DAE · Isaac Sim</div>
     </div>
     <div class="round-pill">
       <div class="pill-dot" id="pill-dot"></div>
@@ -339,24 +339,24 @@
           <span class="node-name">mn1</span>
           <span class="node-badge ok" id="nb-mn1">Normal</span>
         </div>
-        <div class="node-role">Normal Support · 1800 rpm</div>
-        <div class="node-stat" id="ns-mn1">Bearing1_1</div>
+        <div class="node-role">Normal Reference · 1800 rpm</div>
+        <div class="node-stat" id="ns-mn1">Isaac Sim · normal</div>
       </div>
       <div class="node ok" id="nd-mn2">
         <div class="node-header">
           <span class="node-name">mn2</span>
           <span class="node-badge ok" id="nb-mn2">Normal</span>
         </div>
-        <div class="node-role">Normal Support · 1650 rpm</div>
-        <div class="node-stat" id="ns-mn2">Bearing2_2</div>
+        <div class="node-role">Normal Reference · 1650 rpm</div>
+        <div class="node-stat" id="ns-mn2">Isaac Sim · normal support</div>
       </div>
       <div class="node ok" id="nd-mn3">
         <div class="node-header">
           <span class="node-name">mn3</span>
           <span class="node-badge ok" id="nb-mn3">Monitoring</span>
         </div>
-        <div class="node-role">Fault-Transition · 1500 rpm</div>
-        <div class="node-stat" id="ns-mn3">Bearing3_2 · live stream</div>
+        <div class="node-role">Progressive Fault · 1800 rpm</div>
+        <div class="node-stat" id="ns-mn3">Isaac Sim · chronological stream</div>
       </div>
     </div>
   </div>
@@ -519,7 +519,7 @@ function mkLossChart() {
 
 const C = {
   mn1:  mkNodeChart('c-mn1', '#378add'),
-  mn2:  mkNodeChart('c-mn2', '#7f77dd'),
+  mn2:  mkNodeChart('c-mn2', '#378add'),
   mn3:  mkNodeChart('c-mn3', '#378add'),
   loss: mkLossChart(),
 };
@@ -717,34 +717,83 @@ function applyThresholds(thr) {
 }
 
 function handleScore(evt) {
-  scoreIdx++;
+  const currentIdx = Math.max(
+    0,
+    Math.floor(
+      toNumber(
+        evt.mn3_index,
+        scoreIdx
+      )
+    )
+  );
+
+  scoreIdx = currentIdx + 1;
 
   ['mn1', 'mn2', 'mn3'].forEach(node => {
-    if (evt[node] === undefined) return;
-    const score = toNumber(evt[node], null);
-    const thr   = firstFinite(evt[node + '_thr'], thresholds[node], 1.0);
-    if (score === null) return;
-    pushScore(C[node], score, thr);
-    setLV(node, score.toFixed(4), score > thr);
+
+    if (evt[node] === undefined) {
+      return;
+    }
+
+    const score = toNumber(
+      evt[node],
+      null
+    );
+
+    const thr = firstFinite(
+      evt[node + '_thr'],
+      thresholds[node],
+      1.0
+    );
+
+    if (score === null) {
+      return;
+    }
+
+    pushScore(
+      C[node],
+      score,
+      thr
+    );
+
+    setLV(
+      node,
+      score.toFixed(4),
+      score > thr
+    );
   });
 
-  // mn3 onset 추적
-  if (onsetIdx === null && evt['mn3_label'] === 1) {
-    onsetIdx = scoreIdx;
+  // MN3 실제 stream에서 처음 anomaly label이 등장한 위치
+  if (onsetIdx === null&& evt['mn3_label'] === 1) {
+    onsetIdx = currentIdx;
   }
 
-  // mn3 fault 감지 (K회 연속 threshold 초과)
-  if (!faulted && evt.mn3 !== undefined) {
-    const score = toNumber(evt.mn3, null);
-    const thr = firstFinite(evt.mn3_thr, thresholds.mn3, 1.0);
-    if (score !== null && score > thr) {
+  // MN3 fault detection
+  if (!faulted&& evt.mn3 !== undefined) {
+    const score = toNumber(
+      evt.mn3,
+      null
+    );
+
+    const thr = firstFinite(
+      evt.mn3_thr,
+      thresholds.mn3,
+      1.0
+    );
+
+    if (score !== null&& score > thr) {
       mn3Consec++;
-      if (mn3Consec >= K_FAULT) triggerFault(scoreIdx);
-    } else {
+
+      if (mn3Consec >= K_FAULT) {
+        triggerFault(currentIdx);
+      }
+    } 
+    else {
       mn3Consec = 0;
     }
   }
 }
+
 
 function playAlertBeep() {
   try {
@@ -837,9 +886,24 @@ function handleSummary(evt) {
     const card = document.createElement('div');
     card.className = 'summary-node-card';
 
-    const roleTag = isFaultNode
-      ? `<span style="font-size:10px;color:var(--warn);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Fault Transition</span>`
-      : `<span style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Normal Support</span>`;
+    let roleTag;
+
+    if (node === 'mn1') {
+      roleTag =
+        `<span style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
+          Normal Reference
+        </span>`;
+    } else if (node === 'mn2') {
+        roleTag =
+          `<span style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
+            Normal Reference
+          </span>`;
+      } else {
+      roleTag =
+        `<span style="font-size:10px;color:var(--fd-bar);font-weight:600;text-transform:uppercase;letter-spacing:.05em;">
+          Progressive Fault
+        </span>`;
+    }
 
     let rows = `
       <div class="summary-node-name">${node} ${roleTag}</div>
@@ -922,10 +986,12 @@ function connect() {
     if (evt.type === 'init' || evt.type === 'round') {
       applyState(evt);
     } else if (evt.type === 'threshold') {
+
       applyThresholds(evt.thresholds || {});
-      // 새 모델 로드 시 스트리밍 카운터·탐지 상태 리셋
-      scoreIdx  = 0;
-      onsetIdx  = null;
+
+      // 모델이 변경되어 threshold가 바뀌어도
+      // stream 위치와 fault onset은 유지하고,
+      // 연속 초과 카운트만 새 threshold 기준으로 초기화한다.
       mn3Consec = 0;
     } else if (evt.type === 'score') {
       handleScore(evt);

@@ -82,21 +82,10 @@ RMS_FAULT_THRESHOLD = 1.0
 ANOMALY_K_CONSECUTIVE = 3
 
 # threshold = 정상 validation MSE 평균 + N × 표준편차
-THRESHOLD_N_SIGMA = 3.0
+THRESHOLD_N_SIGMA = 4.0
 
-# 데모에서 이상 상태를 표시할 노드
-ANOMALY_DEMO_NODE = os.getenv(
-    "FL_ANOMALY_DEMO_NODE",
-    "mn3",
-)
-
-# MN3는 기본적으로 Round 7부터 이상 샘플을 표시한다.
-ANOMALY_START_ROUND = int(
-    os.getenv(
-        "FL_ANOMALY_START_ROUND",
-        "7",
-    )
-)
+# Isaac Sim 버전에서는 test_stream의 실제 시간 순서를 그대로 사용한다.
+# 따라서 특정 FL Round부터 anomaly를 강제로 표시하는 설정은 사용하지 않는다.
 
 
 # ════════════════════════════════════════════════════════

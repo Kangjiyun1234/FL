@@ -12,8 +12,8 @@ fl/dashboard_server.py — FL 대시보드 백엔드
 2. score-stream
    - 테스트 샘플의 재구성 오차를 SSE로 전송
    - score_idx는 글로벌 모델이 갱신돼도 유지
-   - MN3는 설정된 라운드 전에는 정상 데이터만 표시
-   - 설정된 라운드부터 이상 데이터만 표시
+   - MN3는 PKL의 test_stream 순서를 그대로 표시
+   - NORMAL → TRANSITION → FAULT
 
 SSE 이벤트:
 
@@ -97,20 +97,7 @@ K_CONSECUTIVE = int(
         3,
     )
 )
-ANOMALY_NODE = str(
-    getattr(
-        config,
-        "ANOMALY_DEMO_NODE",
-        "mn3",
-    )
-)
-ANOMALY_START_ROUND = int(
-    getattr(
-        config,
-        "ANOMALY_START_ROUND",
-        7,
-    )
-)
+
 PROJECT_ROOT = Path(
     __file__
 ).resolve().parents[1]
@@ -187,7 +174,6 @@ _shared: dict = {
 
     "summary_sent": False,
 
-    "anomaly_start_round": ANOMALY_START_ROUND,
 }
 
 _shared_lock = threading.Lock()
@@ -303,11 +289,6 @@ def health():
             "thresholds": _shared["thresholds"],
             "score_idx": _shared["score_idx"],
             "summary_sent": _shared["summary_sent"],
-
-            "anomaly_node": ANOMALY_NODE,
-            "anomaly_start_round": (
-                ANOMALY_START_ROUND
-            ),
 
             "run_marker": str(
                 RUN_MARKER_PATH,
@@ -923,56 +904,24 @@ def _compute_summary() -> dict | None:
 # ════════════════════════════════════════════════════════
 
 def _select_stream_index(
-    node: str,
-    node_labels: np.ndarray,
+    node_length: int,
     stream_index: int,
-    fl_round: int,
 ) -> int | None:
     """
-    노드와 현재 FL round에 따라 표시할 샘플 인덱스를 선택한다.
-    기본 동작:
-      MN1:
-        정상 샘플 반복
-      MN2:
-        정상 샘플 반복
-      MN3 Round 1~6:
-        정상 샘플 반복
-      MN3 Round 7 이상:
-        이상 샘플 반복
+    PKL에 저장된 test_stream 순서를 그대로 사용한다.
+
+    Round 기반으로 normal/anomaly 샘플을 골라내지 않는다.
+
+    stream 마지막에 도달하면 처음으로 돌아가지 않고
+    마지막 sample을 유지한다.
     """
 
-    if len(node_labels) == 0:
+    if node_length <= 0:
         return None
 
-    if node == ANOMALY_NODE:
-        if fl_round >= ANOMALY_START_ROUND:
-            target_label = 1
-        else:
-            target_label = 0
-    else:
-        target_label = 0
-
-    candidate_indices = np.flatnonzero(
-        node_labels == target_label
-    )
-
-    # 해당 라벨이 없다면 전체 데이터 사용
-    if len(candidate_indices) == 0:
-        candidate_indices = np.arange(
-            len(node_labels),
-        )
-    if len(candidate_indices) == 0:
-        return None
-
-    selected_position = (
-        stream_index
-        % len(candidate_indices)
-    )
-
-    return int(
-        candidate_indices[
-            selected_position
-        ]
+    return min(
+        int(stream_index),
+        node_length - 1,
     )
 
 
@@ -982,20 +931,32 @@ def _select_stream_index(
 
 def _score_thread() -> None:
     """
-    테스트 reconstruction score를 주기적으로 전송한다.
-    score_idx는 글로벌 모델이 변경돼도 초기화하지 않는다.
+    test_stream reconstruction score를 실제 저장 순서대로 전송한다.
+
+    score_idx는 global model이 변경돼도 유지한다.
+
+    MN3:
+      NORMAL
+      → TRANSITION
+      → FAULT
+
+    순서가 PKL에 저장된 그대로 Dashboard에 전달된다.
     """
 
     while True:
+
         time.sleep(
             SCORE_INTERVAL,
         )
 
         with _shared_lock:
+
             scores = _shared["scores"]
             labels = _shared["labels"]
             thresholds = _shared["thresholds"]
+
             stream_index = _shared["score_idx"]
+
             fl_state = _shared["fl_state"]
             fl_round = _shared["round"]
 
@@ -1008,13 +969,10 @@ def _score_thread() -> None:
         event: dict = {
             "type": "score",
             "round": fl_round,
-            "anomaly_active": (
-                fl_round
-                >= ANOMALY_START_ROUND
-            ),
         }
 
         for node in NODES:
+
             node_scores = scores.get(
                 node,
             )
@@ -1030,45 +988,35 @@ def _score_thread() -> None:
             ):
                 continue
 
-            source_index = _select_stream_index(
-                node=node,
-                node_labels=node_labels,
-                stream_index=stream_index,
-                fl_round=fl_round,
+            source_index = (
+                _select_stream_index(
+                    node_length=len(node_scores),
+                    stream_index=stream_index,
+                )
             )
 
             if source_index is None:
                 continue
 
-            if source_index >= len(node_scores):
+            if source_index >= len(node_labels):
                 continue
 
-            event[node] = round(
-                float(
-                    node_scores[source_index]
-                ),
-                5,
-            )
-            event[f"{node}_label"] = int(
-                node_labels[source_index]
-            )
-            event[f"{node}_thr"] = (
-                thresholds.get(
-                    node,
-                    1.0,
-                )
-            )
+            event[node] = round(float(node_scores[source_index]),5,)
 
-        # type, round, anomaly_active 이외에
-        # 실제 노드 데이터가 하나 이상 들어간 경우만 전송
-        if len(event) > 3:
+            event[f"{node}_label"] = int(node_labels[source_index])
+            event[f"{node}_thr"] = thresholds.get(node,1.0,)
+
+            # 실제 test_stream상의 위치
+            event[f"{node}_index"] = int(source_index)
+
+
+        # type / round 외에 실제 node가 들어갔을 때만 전송
+        if len(event) > 2:
+
             with _shared_lock:
-                _shared["score_idx"] = (
-                    stream_index + 1
-                )
-            _broadcast(
-                event,
-            )
+                _shared["score_idx"] = (stream_index + 1)
+
+            _broadcast(event,)
 
 
 # ════════════════════════════════════════════════════════
@@ -1161,6 +1109,64 @@ def _poll_thread() -> None:
                 )
 
                 nodes: dict = {}
+
+                # clean_fl.sh 이후에도 TinyIoT / 브라우저 쪽에
+                # 이전 데모의 FL_COMPLETED control CIN이 남아 보이는 경우가 있다.
+                # 현재 실행에서 생성된 final global model이 없으면 stale 완료 상태로 보고 무시한다.
+                if fl_state == "FL_COMPLETED":
+                    latest_model_round, latest_model_path = _find_latest_model(
+                        max_round=round_number,
+                    )
+
+                    if (
+                        latest_model_path is None
+                        or latest_model_round < max_rounds
+                    ):
+                        ready_snapshot = {
+                            "fl_state": "FL_READY",
+                            "round": 0,
+                            "max_rounds": config.GLOBAL_ROUNDS,
+                            "nodes": {},
+                        }
+
+                        if ready_snapshot != previous_snapshot:
+                            previous_snapshot = ready_snapshot
+
+                            with _shared_lock:
+                                _shared.update(
+                                    {
+                                        "fl_state": "FL_READY",
+                                        "round": 0,
+                                        "max_rounds": config.GLOBAL_ROUNDS,
+                                        "nodes": {},
+                                        "thresholds": {},
+                                        "scores": {},
+                                        "labels": {},
+                                        "score_idx": 0,
+                                        "model_round": -1,
+                                        "summary_sent": False,
+                                    }
+                                )
+
+                            _broadcast(
+                                {
+                                    "type": "round",
+                                    "fl_state": "FL_READY",
+                                    "round": 0,
+                                    "max_rounds": config.GLOBAL_ROUNDS,
+                                    "nodes": {},
+                                }
+                            )
+
+                        print(
+                            "  [Poll] stale FL_COMPLETED ignored "
+                            "(no current-run final global model)"
+                        )
+
+                        time.sleep(
+                            POLL_INTERVAL,
+                        )
+                        continue
 
                 for node in NODES:
                     node_content = (
@@ -1328,11 +1334,7 @@ def main() -> None:
     print(f"  PKL: {PKL_DIR}")
     print(f"  Global model: {GLOBAL_MODEL_DIR}")
     print(f"  Run marker: {RUN_MARKER_PATH}")
-    print(
-        "  이상 표시: "
-        f"{ANOMALY_NODE}, "
-        f"Round {ANOMALY_START_ROUND}부터"
-    )
+    print("  Stream mode: chronological test_stream")
     print(f"  Port: {PORT}")
     print(f"  http://localhost:{PORT}")
     print()

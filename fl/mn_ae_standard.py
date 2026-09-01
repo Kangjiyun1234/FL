@@ -64,6 +64,9 @@ class MNAETrainer:
 
         self.edge_node = None
 
+        self.cached_sensor_data_path = None
+        self.cached_full_dataset = None
+
         self.app = Flask(f"MN-AE-{self.node_name}")
         self._setup_flask()
 
@@ -314,49 +317,109 @@ class MNAETrainer:
     def _load_sensor_data_for_round(self, round_num: int, max_attempts: int = 3):
         print(f"\n  [{self.node_name}] load sensor data for round_{round_num} ...")
 
-        # TinyIoT discovery가 라벨 기반 검색을 지원하지 않으므로 /la (최신 CIN) 사용.
-        # data_generator.py가 모든 라운드에 동일한 pkl 경로를 publish하므로 문제없음.
-        cin = None
-        for attempt in range(1, max_attempts + 1):
-            cin = om2m.get_latest_content_instance(self.sensor_data_path)
-            if cin and "m2m:cin" in cin:
-                break
-            if attempt < max_attempts:
-                wait_sec = 1.5 * attempt
-                print(f"    ⚠ no data yet (attempt {attempt}/{max_attempts})"
-                      f" -> retry in {wait_sec:.1f}s")
-                time.sleep(wait_sec)
+        if self.cached_full_dataset is None:
+            print("    sensor-data cache empty -> retrieve from TinyIoT once")
 
-        if not cin or "m2m:cin" not in cin:
-            print(f"    ✗ no sensor data in {self.sensor_data_path}")
-            return None
+            cin = None
 
-        con       = cin["m2m:cin"]["con"]
-        meta      = json.loads(con) if isinstance(con, str) else con
-        data_path = meta.get("data_path")
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    cin = om2m.get_latest_content_instance(
+                        self.sensor_data_path
+                    )
+                except Exception as exc:
+                    cin = None
+                    print(
+                        f"    ⚠ sensor-data retrieve failed "
+                        f"(attempt {attempt}/{max_attempts}): {exc}"
+                    )
 
-        if not data_path or not os.path.exists(data_path):
-            print(f"    ✗ data_path not found: {data_path}")
-            return None
+                if cin and "m2m:cin" in cin:
+                    break
 
-        with open(data_path, "rb") as f:
-            data_dict = pickle.load(f)
+                if attempt < max_attempts:
+                    wait_sec = 1.5 * attempt
+                    print(
+                        f"    ⚠ no data yet "
+                        f"(attempt {attempt}/{max_attempts}) "
+                        f"-> retry in {wait_sec:.1f}s"
+                    )
+                    time.sleep(wait_sec)
 
-        # 시나리오: 하루 1라운드, 매 라운드 새로운 데이터 수집
-        # train_signals 전체를 GLOBAL_ROUNDS 등분하여 해당 라운드 슬라이스만 사용
-        train_sigs = data_dict.get("train_signals", np.array([]))
+            if not cin or "m2m:cin" not in cin:
+                print(f"    ✗ no sensor data in {self.sensor_data_path}")
+                return None
+
+            con = cin["m2m:cin"]["con"]
+            meta = json.loads(con) if isinstance(con, str) else con
+            data_path = meta.get("data_path")
+
+            if not data_path or not os.path.exists(data_path):
+                print(f"    ✗ data_path not found: {data_path}")
+                return None
+
+            with open(data_path, "rb") as f:
+                self.cached_full_dataset = pickle.load(f)
+
+            self.cached_sensor_data_path = data_path
+
+            print(
+                f"    ✓ sensor dataset cached: "
+                f"{self.cached_sensor_data_path}"
+            )
+
+        else:
+            print(
+                f"    ✓ sensor dataset from cache: "
+                f"{self.cached_sensor_data_path}"
+            )
+
+        data_dict = dict(self.cached_full_dataset)
+
+        train_sigs = data_dict.get(
+            "train_signals",
+            np.array([]),
+        )
+
         total = len(train_sigs)
-        if total > 0 and config.GLOBAL_ROUNDS > 1:
-            n_per_round = max(1, total // config.GLOBAL_ROUNDS)
-            start = (round_num - 1) * n_per_round
-            end   = total if round_num >= config.GLOBAL_ROUNDS else start + n_per_round
-            data_dict = dict(data_dict)
-            data_dict["train_signals"] = train_sigs[start:end]
-            print(f"    ✓ round slice [{start}:{end}] ({end - start}/{total} samples)")
 
-        node   = data_dict.get("node", "unknown")
-        motors = data_dict.get("motors", [])
-        print(f"    ✓ node={node}  motors={motors}  train_n={len(data_dict['train_signals'])}")
+        if total > 0 and config.GLOBAL_ROUNDS > 1:
+            n_per_round = max(
+                1,
+                total // config.GLOBAL_ROUNDS,
+            )
+
+            start = (round_num - 1) * n_per_round
+
+            end = (total
+                if round_num >= config.GLOBAL_ROUNDS
+                else start + n_per_round
+            )
+
+            data_dict["train_signals"] = train_sigs[start:end].copy()
+
+            print(
+                f"    ✓ round slice "
+                f"[{start}:{end}] "
+                f"({end - start}/{total} samples)"
+            )
+
+        node = data_dict.get(
+            "node",
+            "unknown",
+        )
+
+        motors = data_dict.get(
+            "motors",
+            [],
+        )
+
+        print(
+            f"    ✓ node={node}  "
+            f"motors={motors}  "
+            f"train_n={len(data_dict['train_signals'])}"
+        )
+
         return data_dict
 
     def _build_ae_node_from_data_dict(self, data_dict: dict) -> AEEdgeNode | None:

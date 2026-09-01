@@ -13,10 +13,10 @@
 #   - MN 모델 캐시
 #
 # 유지 대상:
-#   - 전처리된 FEMTO PKL 데이터
+#   - 전처리된 FL PKL 데이터
 #
-# 전처리 데이터가 없을 때만 별도 실행:
-#   python3 fl/prepare_data_femto.py
+# Isaac Sim 데이터를 다시 전처리하려면:
+#   python3 fl/prepare_data_isaac.py
 # ============================================================
 
 set -euo pipefail
@@ -50,7 +50,7 @@ do
         echo "  ${data_file}"
         echo
         echo "다음 명령을 먼저 실행하세요."
-        echo "  python3 fl/prepare_data_femto.py"
+        echo "  python3 fl/prepare_data_isaac.py"
         exit 1
     fi
 
