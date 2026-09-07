@@ -1,0 +1,1037 @@
+# isaac_femto_demo_gateway_v5.py
+# Isaac Sim 6.0.1 Script Editor에서 실행하는 최종 데모 연결 코드
+#
+# 실행:
+# exec(open(r"C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v5.py", encoding="utf-8").read())
+#
+# 중지:
+# stop_femto_demo()
+#
+# 역할:
+# 1. C:\Projects\bearing_testbed\data\femto_replay\mn*_stream.npz 읽기
+# 2. Isaac Sim에서 MN1/MN2/MN3 시각화
+# 3. C:\Projects\bearing_testbed\data\fl_buffer\mn*.pkl runtime buffer 생성
+# 4. TinyIoT oneM2M cnt-sensor-data에 data_path + round metadata publish
+#
+# v3_sync 수정:
+# - 시간 기준 publish 제거
+# - IN-AE의 cnt-fl-control/la에서 FL_TRAINING Round N을 감지했을 때만 sensor-data publish
+# - 해당 round 구간만 빠르게 시각화하고, 다음 round 전까지 shaft는 계속 회전하며 idle 유지
+# - MN-AE 쪽은 patch_mn_ae_sync_round.py 적용 권장
+
+from __future__ import annotations
+
+import os
+import json
+import math
+import time
+import pickle
+import urllib.request
+import urllib.error
+
+import numpy as np
+
+import omni.kit.app
+import omni.usd
+from pxr import UsdGeom, Gf
+
+
+# =========================================================
+# 경로 / oneM2M 설정
+# =========================================================
+
+STREAM_DIR = r"C:\Projects\bearing_testbed\data\femto_replay"
+BUFFER_WRITE_DIR_WIN = r"C:\Projects\bearing_testbed\data\fl_buffer"
+BUFFER_DIR_FOR_WSL = "/mnt/c/Projects/bearing_testbed/data/fl_buffer"
+
+TINYIOT_BASE_URL = "http://127.0.0.1:3000"
+TINYIOT_CSE_NAME = "TinyIoT"
+ORIGINATOR = "CAdmin"
+
+NODE_AE = {
+    "mn1": "MN-AE-1",
+    "mn2": "MN-AE-2",
+    "mn3": "MN-AE-3",
+}
+
+ROOT_PATH = "/World/FEMTO_Replay_Test"
+
+# 80 window = FL 1 round
+WINDOWS_PER_ROUND = 80
+TOTAL_ROUNDS = 10
+
+# Round 내부 시각화 속도.
+# 10.0이면 한 round 80개 window를 약 8초에 재생함.
+# FL이 아직 다음 round로 안 넘어가면 Isaac은 마지막 상태에서 shaft만 계속 회전하며 기다림.
+VISUAL_SPEED_WPS = 10.0
+
+# fl-control polling 주기. 너무 낮추면 TinyIoT 요청이 많아짐.
+FL_CONTROL_POLL_SEC = 0.5
+
+# False로 바꾸면 Isaac 시각화만 하고 TinyIoT publish는 안 함
+ENABLE_PUBLISH = True
+
+
+# =========================================================
+# 상태 / 색상 / 배치
+# =========================================================
+
+STATE_NORMAL = 0
+STATE_DEGRADATION = 1
+STATE_FAULT = 2
+
+STATE_NAME = {
+    STATE_NORMAL: "NORMAL",
+    STATE_DEGRADATION: "DEGRADATION",
+    STATE_FAULT: "FAULT",
+}
+
+COLOR_COMMON_BASE = (0.88, 0.88, 0.88)
+COLOR_NODE_BASE = (0.92, 0.92, 0.92)
+COLOR_RAIL = (0.66, 0.66, 0.66)
+COLOR_SUPPORT = (0.74, 0.74, 0.74)
+COLOR_HOUSING = (0.82, 0.84, 0.86)
+COLOR_SHAFT = (0.96, 0.96, 0.96)
+COLOR_DARK_GAP = (0.10, 0.10, 0.10)
+
+# 상태 색상은 pin에만 적용
+COLOR_PIN_NORMAL = (0.00, 0.80, 0.00)       # 초록
+COLOR_PIN_DEGRADATION = (1.00, 0.85, 0.00)  # 노랑
+COLOR_PIN_FAULT = (1.00, 0.00, 0.00)        # 빨강
+
+STATE_COLOR = {
+    STATE_NORMAL: COLOR_PIN_NORMAL,
+    STATE_DEGRADATION: COLOR_PIN_DEGRADATION,
+    STATE_FAULT: COLOR_PIN_FAULT,
+}
+
+# 월드 좌표 기준: 왼쪽 -> 오른쪽 = MN1, MN2, MN3
+NODE_LAYOUT = {
+    "mn1": (-4.2, 0.0, 0.0),
+    "mn2": (0.0, 0.0, 0.0),
+    "mn3": (4.2, 0.0, 0.0),
+}
+
+NODE_ROTATION_SPEED = {
+    "mn1": 680.0,
+    "mn2": 720.0,
+    "mn3": 780.0,
+}
+
+
+# =========================================================
+# USD 생성 유틸
+# =========================================================
+
+def get_stage():
+    return omni.usd.get_context().get_stage()
+
+
+def remove_prim_if_exists(path: str):
+    stage = get_stage()
+    prim = stage.GetPrimAtPath(path)
+    if prim and prim.IsValid():
+        stage.RemovePrim(path)
+
+
+def set_display_color(prim, rgb):
+    """Prim이 stage remove 등으로 invalid가 되어도 데모가 죽지 않게 방어."""
+    try:
+        if prim is None:
+            return
+        try:
+            if hasattr(prim, "IsValid") and not prim.IsValid():
+                return
+        except Exception:
+            return
+
+        gprim = UsdGeom.Gprim(prim)
+        attr = gprim.GetDisplayColorAttr()
+        if not attr:
+            attr = gprim.CreateDisplayColorAttr()
+        attr.Set([Gf.Vec3f(*rgb)])
+    except Exception:
+        # 재실행/stop 과정에서 old callback이 invalid prim을 만져도 무시
+        pass
+
+def clear_xform_ops(prim):
+    xform = UsdGeom.Xformable(prim)
+    try:
+        xform.ClearXformOpOrder()
+    except Exception:
+        pass
+    return xform
+
+
+def make_xform(path: str, translate=(0, 0, 0), rotate=(0, 0, 0)):
+    stage = get_stage()
+    xf_prim = UsdGeom.Xform.Define(stage, path)
+    prim = xf_prim.GetPrim()
+    xform = clear_xform_ops(prim)
+
+    t_op = xform.AddTranslateOp()
+    r_op = xform.AddRotateXYZOp()
+
+    t_op.Set(Gf.Vec3d(*translate))
+    r_op.Set(Gf.Vec3f(*rotate))
+
+    return xf_prim, t_op, r_op
+
+
+def make_cube(
+    path: str,
+    size=(1, 1, 1),
+    translate=(0, 0, 0),
+    rotate=(0, 0, 0),
+    color=(1, 1, 1),
+):
+    stage = get_stage()
+    cube = UsdGeom.Cube.Define(stage, path)
+    cube.CreateSizeAttr(1.0)
+
+    prim = cube.GetPrim()
+    xform = clear_xform_ops(prim)
+    xform.AddTranslateOp().Set(Gf.Vec3d(*translate))
+    xform.AddRotateXYZOp().Set(Gf.Vec3f(*rotate))
+    xform.AddScaleOp().Set(Gf.Vec3f(*size))
+
+    set_display_color(prim, color)
+    return cube
+
+
+def make_cylinder(
+    path: str,
+    radius=0.1,
+    height=1.0,
+    translate=(0, 0, 0),
+    rotate=(0, 0, 0),
+    color=(1, 1, 1),
+):
+    stage = get_stage()
+    cyl = UsdGeom.Cylinder.Define(stage, path)
+    cyl.CreateRadiusAttr(radius)
+    cyl.CreateHeightAttr(height)
+
+    prim = cyl.GetPrim()
+    xform = clear_xform_ops(prim)
+    xform.AddTranslateOp().Set(Gf.Vec3d(*translate))
+    xform.AddRotateXYZOp().Set(Gf.Vec3f(*rotate))
+
+    set_display_color(prim, color)
+    return cyl
+
+
+
+# =========================================================
+# fl-control polling용 oneM2M GET 유틸
+# =========================================================
+
+def _http_json_get(resource_path: str, timeout: float = 2.0):
+    url = f"{TINYIOT_BASE_URL}/{resource_path}"
+    req = urllib.request.Request(
+        url=url,
+        method="GET",
+        headers={
+            "X-M2M-Origin": ORIGINATOR,
+            "X-M2M-RVI": "2a",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+        return json.loads(raw)
+
+
+def _parse_cin_con(cin_response):
+    if not isinstance(cin_response, dict):
+        return None
+    cin = cin_response.get("m2m:cin")
+    if not isinstance(cin, dict):
+        return None
+    con = cin.get("con")
+    if con is None:
+        return None
+    try:
+        data = json.loads(con) if isinstance(con, str) else con
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def get_latest_fl_command():
+    try:
+        resp = _http_json_get(f"{TINYIOT_CSE_NAME}/IN-AE/cnt-fl-control/la", timeout=2.0)
+        return _parse_cin_con(resp)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            print(f"[fl-control poll] HTTP {e.code}")
+        return None
+    except Exception:
+        # poll 실패는 데모를 죽이지 않음
+        return None
+
+
+# =========================================================
+# 데이터 로딩 / buffer pkl 생성
+# =========================================================
+
+def get_npz_array(npz_obj, candidates, default=None):
+    for key in candidates:
+        if key in npz_obj.files:
+            return np.array(npz_obj[key])
+    return default
+
+
+def load_stream_npz(path: str):
+    with np.load(path, allow_pickle=True) as d:
+        train_windows = get_npz_array(d, ["train_windows"])
+        val_windows = get_npz_array(d, ["val_windows"])
+        val_labels = get_npz_array(d, ["val_labels"])
+
+        test_x = get_npz_array(d, ["test_stream_windows"])
+        test_y = get_npz_array(d, ["test_stream_labels"], default=None)
+        test_states = get_npz_array(d, ["test_stream_state_codes"], default=None)
+        test_times = get_npz_array(d, ["test_stream_times"], default=None)
+        test_progress = get_npz_array(d, ["test_stream_progress"], default=None)
+        rms = get_npz_array(d, ["test_stream_rms"], default=None)
+        peak = get_npz_array(d, ["test_stream_peak"], default=None)
+        visual_amp = get_npz_array(d, ["test_stream_visual_amp"], default=None)
+
+        norm_mean = get_npz_array(d, ["norm_mean"], default=np.array(0.0, dtype=np.float32))
+        norm_std = get_npz_array(d, ["norm_std"], default=np.array(1.0, dtype=np.float32))
+        seq_len = get_npz_array(d, ["seq_len"], default=np.array(2560, dtype=np.int64))
+        sample_rate = get_npz_array(d, ["sample_rate"], default=np.array(25600, dtype=np.int64))
+        window_sec = get_npz_array(d, ["window_sec"], default=np.array(0.1, dtype=np.float32))
+        fault_onset_idx = get_npz_array(d, ["fault_onset_idx"], default=np.array(-1, dtype=np.int64))
+        node_info = get_npz_array(d, ["node_info"], default=np.array("FEMTO replay"))
+        rpm = get_npz_array(d, ["rpm"], default=np.array(0, dtype=np.int64))
+        load_N = get_npz_array(d, ["load_N"], default=np.array(0, dtype=np.int64))
+
+    if test_x is None:
+        raise RuntimeError(f"test_stream_windows not found in {path}")
+    if train_windows is None:
+        raise RuntimeError(f"train_windows not found in {path}")
+    if val_windows is None:
+        raise RuntimeError(f"val_windows not found in {path}")
+
+    test_x = np.array(test_x, dtype=np.float32)
+    train_windows = np.array(train_windows, dtype=np.float32)
+    val_windows = np.array(val_windows, dtype=np.float32)
+
+    n = len(test_x)
+
+    if test_y is None:
+        test_y = np.zeros(n, dtype=np.int64)
+    else:
+        test_y = np.array(test_y).astype(np.int64).reshape(-1)
+
+    if test_states is None:
+        test_states = np.where(test_y > 0, STATE_FAULT, STATE_NORMAL)
+    else:
+        test_states = np.array(test_states).astype(np.int64).reshape(-1)
+
+    if val_labels is None:
+        val_labels = np.zeros(len(val_windows), dtype=np.int64)
+    else:
+        val_labels = np.array(val_labels).astype(np.int64).reshape(-1)
+
+    if rms is None:
+        rms = np.sqrt(np.mean(np.square(test_x), axis=1)).astype(np.float32)
+    else:
+        rms = np.array(rms).astype(np.float32).reshape(-1)
+
+    if peak is None:
+        peak = np.max(np.abs(test_x), axis=1).astype(np.float32)
+    else:
+        peak = np.array(peak).astype(np.float32).reshape(-1)
+
+    if visual_amp is None:
+        visual_amp = np.clip(0.01 + rms * 0.03, 0.01, 0.12).astype(np.float32)
+    else:
+        visual_amp = np.array(visual_amp).astype(np.float32).reshape(-1)
+
+    if test_times is None:
+        test_times = np.arange(n, dtype=np.float32) * 0.1
+    else:
+        test_times = np.array(test_times).astype(np.float32).reshape(-1)
+
+    if test_progress is None:
+        test_progress = np.zeros(n, dtype=np.float32)
+    else:
+        test_progress = np.array(test_progress).astype(np.float32).reshape(-1)
+
+    return {
+        "train_windows": train_windows,
+        "val_windows": val_windows,
+        "val_labels": val_labels,
+        "test_x": test_x,
+        "test_y": test_y,
+        "test_states": test_states,
+        "test_times": test_times,
+        "test_progress": test_progress,
+        "rms": rms,
+        "peak": peak,
+        "visual_amp": visual_amp,
+        "norm_mean": float(np.asarray(norm_mean).item()),
+        "norm_std": float(np.asarray(norm_std).item()),
+        "seq_len": int(np.asarray(seq_len).item()),
+        "sample_rate": int(np.asarray(sample_rate).item()),
+        "window_sec": float(np.asarray(window_sec).item()),
+        "fault_onset_idx": int(np.asarray(fault_onset_idx).item()),
+        "node_info": str(np.asarray(node_info).item()),
+        "rpm": int(np.asarray(rpm).item()),
+        "load_N": int(np.asarray(load_N).item()),
+    }
+
+
+def norm_array(arr: np.ndarray, mean: float, std: float) -> np.ndarray:
+    std = max(float(std), 1e-6)
+    return ((arr.astype(np.float32) - float(mean)) / std).astype(np.float32)
+
+
+def build_fl_dataset(node: str, stream_data):
+    mean = stream_data["norm_mean"]
+    std = stream_data["norm_std"]
+
+    return {
+        "node": node,
+        "source": "isaac_sim_femto_sync_gateway",
+        "motors": [stream_data["node_info"]],
+        "train_signals": norm_array(stream_data["train_windows"], mean, std),
+        "val_signals": norm_array(stream_data["val_windows"], mean, std),
+        "val_labels": stream_data["val_labels"].astype(np.int64),
+        "test_stream_signals": norm_array(stream_data["test_x"], mean, std),
+        "test_stream_labels": stream_data["test_y"].astype(np.int64),
+        "test_stream_times": stream_data["test_times"].astype(np.float32),
+        "test_stream_progress": stream_data["test_progress"].astype(np.float32),
+        "test_stream_state_codes": stream_data["test_states"].astype(np.int64),
+        "test_stream_rms": stream_data["rms"].astype(np.float32),
+        "test_stream_peak": stream_data["peak"].astype(np.float32),
+        "test_stream_visual_amp": stream_data["visual_amp"].astype(np.float32),
+        "norm_mean": np.float32(mean),
+        "norm_std": np.float32(std),
+        "seq_len": int(stream_data["seq_len"]),
+        "n_channels": 1,
+        "sample_rate": int(stream_data["sample_rate"]),
+        "window_sec": float(stream_data["window_sec"]),
+        "fault_onset_idx": int(stream_data["fault_onset_idx"]),
+        "created_by": "isaac_femto_demo_gateway_v5.py",
+    }
+
+
+def write_fl_buffers(streams):
+    os.makedirs(BUFFER_WRITE_DIR_WIN, exist_ok=True)
+
+    for node in ["mn1", "mn2", "mn3"]:
+        dataset = build_fl_dataset(node, streams[node])
+        out_path = os.path.join(BUFFER_WRITE_DIR_WIN, f"{node}.pkl")
+
+        with open(out_path, "wb") as f:
+            pickle.dump(dataset, f)
+
+        print(
+            f"[buffer] {node}: {out_path} "
+            f"train={dataset['train_signals'].shape} "
+            f"test={dataset['test_stream_signals'].shape}"
+        )
+
+
+# =========================================================
+# oneM2M publish
+# =========================================================
+
+def create_content_instance(container_path: str, content, labels=None) -> bool:
+    if not ENABLE_PUBLISH:
+        print(f"[NO_PUBLISH] {container_path} <- {content}")
+        return True
+
+    url = f"{TINYIOT_BASE_URL}/{container_path}"
+
+    cin_obj = {
+        "con": json.dumps(content, ensure_ascii=False, separators=(",", ":")),
+    }
+
+    if labels:
+        cin_obj["lbl"] = labels
+
+    payload = json.dumps({"m2m:cin": cin_obj}).encode("utf-8")
+
+    req = urllib.request.Request(
+        url=url,
+        data=payload,
+        method="POST",
+        headers={
+            "X-M2M-Origin": ORIGINATOR,
+            "X-M2M-RVI": "2a",
+            "Content-Type": "application/json;ty=4",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.getcode()
+            if status == 201:
+                return True
+            print(f"[publish fail] {container_path}: status={status}")
+            return False
+
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        print(f"[publish fail] {container_path}: HTTP {e.code} {body[:300]}")
+        return False
+
+    except Exception as e:
+        print(f"[publish error] {container_path}: {type(e).__name__}: {e}")
+        return False
+
+
+def publish_round_metadata(node: str, round_num: int, start_idx: int, end_idx: int, stream_data) -> bool:
+    container_path = f"{TINYIOT_CSE_NAME}/{NODE_AE[node]}/cnt-sensor-data"
+
+    labels = [
+        node,
+        f"round_{round_num}",
+        "type:isaac-sim-sync-buffer",
+    ]
+
+    labels_arr = stream_data["test_y"][start_idx:end_idx]
+    states_arr = stream_data["test_states"][start_idx:end_idx]
+    rms_arr = stream_data["rms"][start_idx:end_idx]
+    peak_arr = stream_data["peak"][start_idx:end_idx]
+
+    payload = {
+        "type": "isaac-sim-sync-buffer",
+        "jobState": "FL_TRAINING",
+        "node": node,
+        "round": int(round_num),
+        "currentRound": int(round_num),
+        "data_path": f"{BUFFER_DIR_FOR_WSL}/{node}.pkl",
+        "stream_path": f"/mnt/c/Projects/bearing_testbed/data/femto_replay/{node}_stream.npz",
+        "start_idx": int(start_idx),
+        "end_idx": int(end_idx),
+        "window_count": int(end_idx - start_idx),
+        "rms_mean": float(np.mean(rms_arr)) if len(rms_arr) else 0.0,
+        "peak_max": float(np.max(peak_arr)) if len(peak_arr) else 0.0,
+        "state_codes": sorted([int(x) for x in set(states_arr.tolist())]),
+        "fault_count": int(np.sum(labels_arr == 1)),
+        "timestamp": time.time(),
+    }
+
+    ok = create_content_instance(container_path, payload, labels=labels)
+    mark = "OK" if ok else "FAIL"
+    print(f"[publish {mark}] {node} R{round_num} -> {container_path}")
+    return ok
+
+
+# =========================================================
+# 노드 비주얼
+# =========================================================
+
+class NodeVisual:
+    def __init__(self, root_path: str, name: str, base_pos, stream_data):
+        self.root_path = root_path
+        self.name = name
+        self.base_pos = base_pos
+        self.stream = stream_data
+
+        self.path = f"{root_path}/{name.upper()}"
+        self.rotor_center_t = None
+        self.rotor_group_r = None
+        self.pin_prim = None
+
+        self._build()
+
+    def _build(self):
+        x, y, z = self.base_pos
+
+        make_xform(self.path, translate=(x, y, z), rotate=(0, 0, 0))
+
+        make_cube(
+            f"{self.path}/NodeBase",
+            size=(2.35, 1.55, 0.10),
+            translate=(0.0, 0.0, 0.10),
+            color=COLOR_NODE_BASE,
+        )
+
+        make_cube(
+            f"{self.path}/CenterGap",
+            size=(1.35, 0.48, 0.025),
+            translate=(0.08, 0.0, 0.165),
+            color=COLOR_DARK_GAP,
+        )
+
+        make_cube(
+            f"{self.path}/Rail",
+            size=(1.55, 0.28, 0.08),
+            translate=(0.0, 0.0, 0.24),
+            color=COLOR_RAIL,
+        )
+
+        make_cube(
+            f"{self.path}/Support",
+            size=(0.92, 0.72, 0.18),
+            translate=(0.0, 0.0, 0.38),
+            color=COLOR_SUPPORT,
+        )
+
+        make_xform(
+            f"{self.path}/HousingGroup",
+            translate=(0.0, 0.0, 0.49),
+            rotate=(0, 0, 0),
+        )
+
+        make_cube(
+            f"{self.path}/HousingGroup/HousingBottom",
+            size=(1.00, 0.74, 0.12),
+            translate=(0.0, 0.0, 0.06),
+            color=COLOR_HOUSING,
+        )
+
+        make_cube(
+            f"{self.path}/HousingGroup/HousingLeftWall",
+            size=(1.00, 0.10, 0.60),
+            translate=(0.0, -0.34, 0.36),
+            color=COLOR_HOUSING,
+        )
+
+        make_cube(
+            f"{self.path}/HousingGroup/HousingRightWall",
+            size=(1.00, 0.10, 0.60),
+            translate=(0.0, 0.34, 0.36),
+            color=COLOR_HOUSING,
+        )
+
+        make_cube(
+            f"{self.path}/HousingGroup/HousingTopBridge",
+            size=(1.00, 0.74, 0.10),
+            translate=(0.0, 0.0, 0.66),
+            color=COLOR_HOUSING,
+        )
+
+        make_cube(
+            f"{self.path}/HousingGroup/HousingBackPlate",
+            size=(0.10, 0.74, 0.44),
+            translate=(-0.38, 0.0, 0.34),
+            color=COLOR_HOUSING,
+        )
+
+        _, self.rotor_center_t, _ = make_xform(
+            f"{self.path}/RotorCenter",
+            translate=(0.42, 0.0, 0.89),
+            rotate=(0, 0, 0),
+        )
+
+        _, _, self.rotor_group_r = make_xform(
+            f"{self.path}/RotorCenter/RotorGroup",
+            translate=(0.0, 0.0, 0.0),
+            rotate=(0, 0, 0),
+        )
+
+        make_cylinder(
+            f"{self.path}/RotorCenter/RotorGroup/Shaft",
+            radius=0.095,
+            height=1.80,
+            rotate=(0.0, 90.0, 0.0),
+            translate=(0.0, 0.0, 0.0),
+            color=COLOR_SHAFT,
+        )
+
+        make_cylinder(
+            f"{self.path}/RotorCenter/RotorGroup/ShaftNose",
+            radius=0.13,
+            height=0.34,
+            rotate=(0.0, 90.0, 0.0),
+            translate=(0.98, 0.0, 0.0),
+            color=COLOR_SHAFT,
+        )
+
+        # 원통 shaft에 붙어 도는 상태 pin
+        pin = make_cube(
+            f"{self.path}/RotorCenter/RotorGroup/StatePin",
+            size=(0.24, 0.08, 0.08),
+            translate=(0.62, 0.0, 0.135),
+            rotate=(0.0, 0.0, 0.0),
+            color=COLOR_PIN_NORMAL,
+        )
+        self.pin_prim = pin.GetPrim()
+
+    def get_state_at(self, idx: int):
+        max_i = len(self.stream["test_x"]) - 1
+        idx = max(0, min(idx, max_i))
+
+        label = int(self.stream["test_y"][idx])
+        state = int(self.stream["test_states"][idx])
+        rms = float(self.stream["rms"][idx])
+        peak = float(self.stream["peak"][idx])
+
+        return {"label": label, "state": state, "rms": rms, "peak": peak}
+
+    def update_visual(self, idx: int, elapsed: float, idle: bool = False):
+        info = self.get_state_at(idx)
+
+        # 이전 실행의 callback이 남아 있거나 stage가 재생성된 경우,
+        # old prim/xform op가 invalid가 될 수 있음.
+        # 이때 RuntimeError로 데모 전체가 멈추지 않게 방어함.
+        try:
+            if self.pin_prim is not None:
+                try:
+                    if hasattr(self.pin_prim, "IsValid") and not self.pin_prim.IsValid():
+                        return info
+                except Exception:
+                    return info
+
+            angle = (elapsed * NODE_ROTATION_SPEED[self.name]) % 360.0
+            self.rotor_group_r.Set(Gf.Vec3f(angle, 0.0, 0.0))
+
+            rms = info["rms"]
+
+            # round 대기 중에도 화면이 완전히 멈춰 보이지 않게
+            # shaft 회전은 유지하고 vibration만 약하게 낮춤.
+            if idle:
+                amp = min(max(rms * 0.006, 0.001), 0.012)
+            else:
+                amp = min(max(rms * 0.018, 0.002), 0.045)
+
+            wobble = amp * math.sin(elapsed * 24.0)
+            self.rotor_center_t.Set(Gf.Vec3d(0.42, 0.0, 0.89 + wobble))
+
+            set_display_color(self.pin_prim, STATE_COLOR.get(info["state"], COLOR_PIN_NORMAL))
+
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "invalid prim" in msg or "expired" in msg or "accessed schema" in msg:
+                return info
+            raise
+        except Exception:
+            # 시각화 callback 문제로 FL publish/데모 전체가 죽지 않게 함.
+            return info
+
+        return info
+
+
+# =========================================================
+# 메인 컨트롤러
+# =========================================================
+
+class FEMTODemoController:
+    def __init__(self, stream_dir=STREAM_DIR, visual_speed=VISUAL_SPEED_WPS):
+        self.stream_dir = stream_dir
+        self.visual_speed = visual_speed
+
+        self.nodes = {}
+        self.streams = {}
+        self.subscription = None
+
+        self.elapsed = 0.0
+        self.last_time = time.time()
+        self.accum = 0.0
+        self.window_interval = 1.0 / self.visual_speed
+
+        self.current_display_idx = 0
+        self.visual_idx = 0
+        self.round_start_idx = 0
+        self.round_end_idx = 0
+        self.max_windows = 0
+
+        self.running = False
+        self.round_active = False
+        self.current_round = 0
+        self.expected_next_round = 1
+        self.published_rounds = set()
+
+        self.next_poll_time = 0.0
+        self.completed_logged = False
+
+    def load_streams(self):
+        loaded = {}
+        for name in ["mn1", "mn2", "mn3"]:
+            path = os.path.join(self.stream_dir, f"{name}_stream.npz")
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"stream file not found: {path}")
+            print(f"[load] {name}: {path}")
+            loaded[name] = load_stream_npz(path)
+        return loaded
+
+    def build_scene(self):
+        stage = get_stage()
+        if stage is None:
+            raise RuntimeError("USD stage가 없습니다. Isaac Sim에서 새 stage를 연 뒤 실행하세요.")
+
+        remove_prim_if_exists(ROOT_PATH)
+
+        make_xform(
+            ROOT_PATH,
+            translate=(0, 0, 0),
+            rotate=(0, 0, 0),
+        )
+
+        make_cube(
+            f"{ROOT_PATH}/CommonBase",
+            size=(11.4, 2.5, 0.07),
+            translate=(0.0, 0.0, 0.035),
+            color=COLOR_COMMON_BASE,
+        )
+
+        make_cube(
+            f"{ROOT_PATH}/CommonRailFront",
+            size=(10.6, 0.13, 0.07),
+            translate=(0.0, 0.92, 0.095),
+            color=COLOR_RAIL,
+        )
+
+        make_cube(
+            f"{ROOT_PATH}/CommonRailBack",
+            size=(10.6, 0.13, 0.07),
+            translate=(0.0, -0.92, 0.095),
+            color=COLOR_RAIL,
+        )
+
+        self.streams = self.load_streams()
+        write_fl_buffers(self.streams)
+
+        self.nodes = {}
+        for name in ["mn1", "mn2", "mn3"]:
+            self.nodes[name] = NodeVisual(
+                ROOT_PATH,
+                name,
+                NODE_LAYOUT[name],
+                self.streams[name],
+            )
+
+        self.max_windows = min(
+            len(node.stream["test_x"])
+            for node in self.nodes.values()
+        )
+
+    def publish_round(self, round_num: int):
+        if round_num in self.published_rounds:
+            return
+
+        start_idx = (round_num - 1) * WINDOWS_PER_ROUND
+        end_idx = min(round_num * WINDOWS_PER_ROUND, self.max_windows)
+
+        print(f"\n[sync] FL Round {round_num} detected")
+        print(f"[round publish] R{round_num} [{start_idx}:{end_idx}]")
+
+        ok_all = True
+        for node in ["mn1", "mn2", "mn3"]:
+            ok = publish_round_metadata(
+                node,
+                round_num,
+                start_idx,
+                end_idx,
+                self.streams[node],
+            )
+            ok_all = ok_all and ok
+
+        if ok_all:
+            self.published_rounds.add(round_num)
+
+        self.current_round = round_num
+        self.round_start_idx = start_idx
+        self.round_end_idx = end_idx
+        self.visual_idx = start_idx
+        self.current_display_idx = start_idx
+        self.round_active = True
+
+        self.expected_next_round = round_num + 1
+
+        print(
+            f"[visual play] R{round_num} "
+            f"{start_idx}->{end_idx} at {self.visual_speed} windows/sec "
+            f"(about {(end_idx - start_idx) / self.visual_speed:.1f}s)"
+        )
+
+    def handle_fl_command(self, command):
+        if not isinstance(command, dict):
+            return
+
+        state = str(command.get("jobState", ""))
+        try:
+            round_num = int(command.get("currentRound", command.get("round", 0)))
+        except Exception:
+            round_num = 0
+
+        if state == "FL_COMPLETED":
+            if not self.completed_logged:
+                print("\n[sync] FL_COMPLETED detected. Isaac remains in idle visual state.")
+                self.completed_logged = True
+            return
+
+        if state != "FL_TRAINING":
+            return
+
+        if round_num < 1 or round_num > TOTAL_ROUNDS:
+            return
+
+        if round_num in self.published_rounds:
+            return
+
+        # stale R10 같은 것을 잘못 잡지 않도록 순서대로만 허용
+        if round_num != self.expected_next_round:
+            print(
+                f"[sync wait] observed FL round={round_num}, "
+                f"expected={self.expected_next_round}; ignore stale/out-of-order command"
+            )
+            return
+
+        self.publish_round(round_num)
+
+    def poll_fl_control_if_needed(self, now: float):
+        if now < self.next_poll_time:
+            return
+
+        self.next_poll_time = now + FL_CONTROL_POLL_SEC
+        command = get_latest_fl_command()
+        if command:
+            self.handle_fl_command(command)
+
+    def update_all_nodes(self, idle: bool):
+        for name in ["mn1", "mn2", "mn3"]:
+            self.nodes[name].update_visual(self.current_display_idx, self.elapsed, idle=idle)
+
+    def on_update(self, event):
+        if not self.running:
+            return
+
+        now = time.time()
+        dt = now - self.last_time
+        self.last_time = now
+
+        self.elapsed += dt
+        self.accum += dt
+
+        self.poll_fl_control_if_needed(now)
+
+        idle = not self.round_active
+
+        # 매 프레임 회전은 계속함. round 대기 중에도 멈춰 보이지 않게 유지.
+        self.update_all_nodes(idle=idle)
+
+        if not self.round_active:
+            return
+
+        if self.accum < self.window_interval:
+            return
+
+        self.accum = 0.0
+
+        if self.visual_idx % 20 == 0:
+            print(f"\n[visual] R{self.current_round} idx={self.visual_idx}")
+            for name in ["mn1", "mn2", "mn3"]:
+                info = self.nodes[name].update_visual(self.visual_idx, self.elapsed, idle=False)
+                print(
+                    f"  {name}: {STATE_NAME[info['state']]:<12} "
+                    f"label={info['label']} "
+                    f"rms={info['rms']:.4f} "
+                    f"peak={info['peak']:.4f}"
+                )
+
+        self.current_display_idx = self.visual_idx
+        self.visual_idx += 1
+
+        if self.visual_idx >= self.round_end_idx:
+            self.current_display_idx = max(self.round_end_idx - 1, 0)
+            self.round_active = False
+            print(
+                f"[visual idle] R{self.current_round} visual finished. "
+                "Waiting for next FL round command..."
+            )
+
+    def start(self):
+        self.stop(silent=True)
+
+        self.elapsed = 0.0
+        self.last_time = time.time()
+        self.accum = 0.0
+
+        self.current_display_idx = 0
+        self.visual_idx = 0
+        self.round_start_idx = 0
+        self.round_end_idx = 0
+
+        self.round_active = False
+        self.current_round = 0
+        self.expected_next_round = 1
+        self.published_rounds = set()
+        self.next_poll_time = 0.0
+        self.completed_logged = False
+
+        self.build_scene()
+
+        app = omni.kit.app.get_app()
+        self.subscription = app.get_update_event_stream().create_subscription_to_pop(
+            self.on_update,
+            name="femto_isaac_demo_gateway_v5",
+        )
+        self.running = True
+
+        print("[start] FEMTO Isaac synced demo started - v5")
+        print(f"        stream_dir={self.stream_dir}")
+        print(f"        buffer_dir_win={BUFFER_WRITE_DIR_WIN}")
+        print(f"        buffer_dir_wsl={BUFFER_DIR_FOR_WSL}")
+        print(f"        visual_speed={self.visual_speed} windows/sec")
+        print(f"        round visual duration ≈ {WINDOWS_PER_ROUND / self.visual_speed:.1f} sec")
+        print(f"        fl-control poll={FL_CONTROL_POLL_SEC} sec")
+        print(f"        publish={ENABLE_PUBLISH}")
+        print("        world order: left=MN1, center=MN2, right=MN3")
+        print("        pin color: green=NORMAL, yellow=DEGRADATION, red=FAULT")
+        print("        Waiting for IN-AE FL_TRAINING round command...")
+        print("        stop command: stop_femto_demo()")
+
+    def stop(self, silent=False):
+        if self.subscription is not None:
+            try:
+                self.subscription = None
+            except Exception:
+                pass
+
+        self.running = False
+
+        if not silent:
+            print("[stop] FEMTO Isaac synced demo stopped")
+
+
+# =========================================================
+# 전역 함수
+# =========================================================
+
+try:
+    _FEMTO_DEMO_CONTROLLER
+except NameError:
+    _FEMTO_DEMO_CONTROLLER = None
+
+
+def start_femto_demo(stream_dir=STREAM_DIR, speed=VISUAL_SPEED_WPS):
+    global _FEMTO_DEMO_CONTROLLER
+
+    # 재실행 시 이전 subscription/callback을 먼저 정리해야
+    # "Accessed schema on invalid prim" 오류가 반복되지 않음.
+    old_controller = _FEMTO_DEMO_CONTROLLER
+    if old_controller is not None:
+        try:
+            old_controller.stop(silent=True)
+            print("[restart] previous FEMTO Isaac demo stopped")
+        except Exception:
+            pass
+
+    _FEMTO_DEMO_CONTROLLER = FEMTODemoController(
+        stream_dir=stream_dir,
+        visual_speed=speed,
+    )
+    _FEMTO_DEMO_CONTROLLER.start()
+
+
+def stop_femto_demo():
+    global _FEMTO_DEMO_CONTROLLER
+    if _FEMTO_DEMO_CONTROLLER is not None:
+        try:
+            _FEMTO_DEMO_CONTROLLER.stop()
+        finally:
+            _FEMTO_DEMO_CONTROLLER = None
+    else:
+        print("[stop] no FEMTO Isaac demo controller")
+
+
+start_femto_demo()
