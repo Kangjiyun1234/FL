@@ -7,6 +7,8 @@ FEMTO(PRONOSTIA) 베어링 데이터를 Isaac Sim gateway용 stream 패키지로
 - 기존 FEMTO 전체 데이터를 그대로 들고 다니지 않고,
   상태별(normal / degradation / fault) 패턴 pool을 만든다.
 - 그 패턴을 변형하여 MN별로 충분한 양의 window stream을 생성한다.
+- NORMAL pattern pool의 과한 spike outlier는 제거해서 정상 구간이 고장처럼 튀지 않게 한다.
+- MN3는 정상 -> 열화 -> 초기 고장 -> 고장 흐름이 너무 계단식으로 튀지 않게 구성한다.
 - Isaac Sim은 생성된 mn*_stream.npz를 시간순으로 읽어 화면을 재생하고,
   같은 window_idx를 FL 쪽으로 전달한다.
 
@@ -109,14 +111,26 @@ MN3_NORMAL_N = int(
     )
 )
 
+# 기존 150이면 MN3 fault onset이 600이었음.
+# 데모에서 열화 -> 고장 전환이 너무 급격하게 보여서 기본값을 170으로 조정.
+# 즉 MN3 기본 fault onset은 450 + 170 = 620.
 MN3_DEGRADATION_N = int(
     os.getenv(
         "FEMTO_REPLAY_MN3_DEGRADATION_N",
-        "150",
+        "170",
     )
 )
 
 MN3_FAULT_N = TEST_STREAM_N - MN3_NORMAL_N - MN3_DEGRADATION_N
+
+# MN3 fault 구간 초입도 바로 세게 튀지 않도록
+# 첫 일부 fault window를 직전 degradation window와 섞어 완만하게 만든다.
+MN3_EARLY_FAULT_SOFT_N = int(
+    os.getenv(
+        "FEMTO_REPLAY_MN3_EARLY_FAULT_SOFT_N",
+        "20",
+    )
+)
 
 # MN2 test stream 구성: 고장 노드는 아니므로 label은 전부 0
 MN2_NORMAL_N = int(
@@ -167,6 +181,30 @@ STATE_FAULT = 2
 STATE_NAMES = np.array(
     ["NORMAL", "DEGRADATION", "FAULT"],
     dtype="<U16",
+)
+
+# NORMAL pattern pool spike 완화 설정.
+# 정상 구간을 완전히 매끈하게 만드는 것이 아니라,
+# RMS/peak가 비정상적으로 큰 상위 outlier만 제거한다.
+NORMAL_OUTLIER_Q = float(
+    os.getenv(
+        "FEMTO_REPLAY_NORMAL_OUTLIER_Q",
+        "97.5",
+    )
+)
+
+NORMAL_OUTLIER_MAD_K = float(
+    os.getenv(
+        "FEMTO_REPLAY_NORMAL_OUTLIER_MAD_K",
+        "4.0",
+    )
+)
+
+MIN_NORMAL_KEEP_RATIO = float(
+    os.getenv(
+        "FEMTO_REPLAY_MIN_NORMAL_KEEP_RATIO",
+        "0.85",
+    )
 )
 
 
@@ -240,6 +278,145 @@ def compute_peak(signal: np.ndarray) -> float:
         np.max(
             np.abs(signal)
         )
+    )
+
+
+def compute_metric_arrays(windows: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    if len(windows) == 0:
+        return (
+            np.empty((0,), dtype=np.float32),
+            np.empty((0,), dtype=np.float32),
+        )
+
+    rms = np.sqrt(
+        np.mean(
+            np.square(windows, dtype=np.float32),
+            axis=1,
+            dtype=np.float64,
+        )
+    ).astype(np.float32)
+
+    peak = np.max(
+        np.abs(windows),
+        axis=1,
+    ).astype(np.float32)
+
+    return rms, peak
+
+
+def robust_upper_limit(
+    values: np.ndarray,
+    percentile_q: float,
+    mad_k: float,
+) -> float:
+    """
+    percentile + MAD를 함께 써서 과한 정상 outlier 기준을 잡는다.
+    둘 중 더 큰 기준을 사용해 정상 변동까지 과하게 자르지 않게 한다.
+    """
+    values = np.asarray(
+        values,
+        dtype=np.float32,
+    )
+
+    if len(values) == 0:
+        return float("inf")
+
+    median = float(
+        np.median(values)
+    )
+
+    mad = float(
+        np.median(
+            np.abs(values - median)
+        )
+    )
+
+    robust_sigma = 1.4826 * mad
+
+    percentile_limit = float(
+        np.percentile(
+            values,
+            percentile_q,
+        )
+    )
+
+    mad_limit = median + mad_k * robust_sigma
+
+    return max(
+        percentile_limit,
+        mad_limit,
+    )
+
+
+def filter_normal_spike_outliers(
+    normal_pool: np.ndarray,
+    condition: int,
+) -> np.ndarray:
+    """
+    NORMAL pattern pool에서 RMS/peak가 비정상적으로 큰 window를 제거한다.
+
+    목적:
+    - 정상 구간에서도 작은 noise/변동은 유지
+    - 정상인데 고장처럼 크게 튀는 outlier만 제거
+    """
+    normal_pool = np.asarray(
+        normal_pool,
+        dtype=np.float32,
+    )
+
+    if len(normal_pool) < 20:
+        return normal_pool
+
+    rms, peak = compute_metric_arrays(
+        normal_pool,
+    )
+
+    rms_limit = robust_upper_limit(
+        rms,
+        percentile_q=NORMAL_OUTLIER_Q,
+        mad_k=NORMAL_OUTLIER_MAD_K,
+    )
+
+    peak_limit = robust_upper_limit(
+        peak,
+        percentile_q=NORMAL_OUTLIER_Q,
+        mad_k=NORMAL_OUTLIER_MAD_K,
+    )
+
+    keep_mask = (
+        (rms <= rms_limit)
+        & (peak <= peak_limit)
+    )
+
+    keep_n = int(
+        np.sum(keep_mask)
+    )
+
+    min_keep_n = int(
+        len(normal_pool) * MIN_NORMAL_KEEP_RATIO
+    )
+
+    # 너무 많이 제거되면 데모 데이터 분포가 과하게 조작되므로 원본 유지.
+    if keep_n < min_keep_n:
+        print(
+            f"    normal spike filter skipped: "
+            f"Condition {condition}, keep={keep_n}/{len(normal_pool)} "
+            f"below min_keep={min_keep_n}"
+        )
+        return normal_pool
+
+    removed_n = len(normal_pool) - keep_n
+
+    if removed_n:
+        print(
+            f"    normal spike filter: Condition {condition}, "
+            f"removed={removed_n}/{len(normal_pool)}, "
+            f"rms_limit={rms_limit:.4f}, peak_limit={peak_limit:.4f}"
+        )
+
+    return normal_pool[keep_mask].astype(
+        np.float32,
+        copy=False,
     )
 
 
@@ -424,8 +601,19 @@ def build_condition_pools(condition: int) -> Dict[str, np.ndarray]:
             axis=0,
         ).astype(np.float32)
 
+    normal_pool = concat(
+        normal_parts,
+    )
+
+    # 데모 안정성을 위해 NORMAL pool의 과한 spike outlier만 제거한다.
+    # degradation/fault pool은 상태 변화를 보여줘야 하므로 여기서 제거하지 않는다.
+    normal_pool = filter_normal_spike_outliers(
+        normal_pool,
+        condition,
+    )
+
     pools = {
-        "normal": concat(normal_parts),
+        "normal": normal_pool,
         "degradation": concat(degradation_parts),
         "fault": concat(fault_parts),
     }
@@ -567,6 +755,92 @@ def sample_patterns(
         ],
         axis=0,
     ).astype(np.float32)
+
+
+def soften_early_fault_transition(
+    degradation_windows: np.ndarray,
+    fault_windows: np.ndarray,
+    rng: np.random.Generator,
+    soft_n: int,
+) -> np.ndarray:
+    """
+    MN3 fault 초입이 너무 계단식으로 튀지 않도록
+    fault 구간 첫 soft_n개를 직전 degradation window와 blend한다.
+
+    label은 fault로 유지된다.
+    즉 실제 fault onset은 유지하되, 초입 signal 강도만 완만하게 만든다.
+    """
+    fault_windows = np.asarray(
+        fault_windows,
+        dtype=np.float32,
+    ).copy()
+
+    degradation_windows = np.asarray(
+        degradation_windows,
+        dtype=np.float32,
+    )
+
+    if (
+        soft_n <= 0
+        or len(fault_windows) == 0
+        or len(degradation_windows) == 0
+    ):
+        return fault_windows
+
+    n = min(
+        soft_n,
+        len(fault_windows),
+        len(degradation_windows),
+    )
+
+    # 직전 degradation 후반부를 사용해야 전환이 자연스럽다.
+    deg_tail = degradation_windows[-n:]
+
+    # fault 초입은 degradation 비중을 높이고,
+    # 뒤로 갈수록 fault 비중을 키운다.
+    alpha = np.linspace(
+        0.25,
+        0.85,
+        n,
+        dtype=np.float32,
+    )
+
+    for i in range(n):
+        blended = (
+            (1.0 - float(alpha[i])) * deg_tail[i]
+            + float(alpha[i]) * fault_windows[i]
+        ).astype(np.float32)
+
+        # 복붙 느낌을 줄이기 위한 아주 약한 noise.
+        sigma = max(
+            float(np.std(blended)),
+            1e-6,
+        )
+
+        blended = (
+            blended
+            + rng.normal(
+                0.0,
+                sigma * 0.004,
+                size=blended.shape,
+            ).astype(np.float32)
+        )
+
+        blended = (
+            blended
+            - np.mean(blended, dtype=np.float64).astype(np.float32)
+        ).astype(np.float32)
+
+        fault_windows[i] = blended
+
+    print(
+        f"  MN3 early fault softened: first {n} fault windows blended with degradation"
+    )
+
+    return fault_windows.astype(
+        np.float32,
+        copy=False,
+    )
 
 
 # ============================================================
@@ -875,6 +1149,13 @@ def build_node_stream(
             mode="fault",
         )
 
+        test_fault = soften_early_fault_transition(
+            test_degradation,
+            test_fault,
+            rng,
+            soft_n=MN3_EARLY_FAULT_SOFT_N,
+        )
+
         test_windows = np.concatenate(
             [
                 test_normal,
@@ -1061,6 +1342,16 @@ def main() -> None:
     print(f"TRAIN_N    : {TRAIN_N}")
     print(f"VAL        : normal={VAL_NORMAL_N}, anomaly={VAL_ANOMALY_N}")
     print(f"TEST_N     : {TEST_STREAM_N}")
+    print(
+        f"MN3 test   : normal={MN3_NORMAL_N}, "
+        f"degradation={MN3_DEGRADATION_N}, fault={MN3_FAULT_N}, "
+        f"onset={MN3_NORMAL_N + MN3_DEGRADATION_N}"
+    )
+    print(
+        f"N spike    : q={NORMAL_OUTLIER_Q}, "
+        f"mad_k={NORMAL_OUTLIER_MAD_K}, "
+        f"min_keep_ratio={MIN_NORMAL_KEEP_RATIO}"
+    )
 
     if not FEMTO_ROOT.exists():
         print(f"\n[ERROR] FEMTO_ROOT를 찾지 못했습니다: {FEMTO_ROOT}")
@@ -1131,6 +1422,7 @@ def main() -> None:
         )
 
     print("\n완료.")
+    print("기본 MN3 fault onset은 620입니다.")
     print("Isaac Sim gateway는 아래 파일을 읽어 시간순으로 재생/전달하면 됩니다.")
     print(f"  {OUT_DIR}/mn1_stream.npz")
     print(f"  {OUT_DIR}/mn2_stream.npz")
