@@ -5,8 +5,6 @@
 #
 # 실행:
 #   ./run_femto_isaac_demo.sh
-# 또는 scripts 아래에 둔 경우:
-#   ./scripts/run_femto_isaac_demo.sh
 #
 # 옵션:
 #   ./run_femto_isaac_demo.sh --skip-clean
@@ -15,15 +13,15 @@
 #   ./run_femto_isaac_demo.sh --full-train
 #
 # 주의:
-# - TinyIoT는 이 스크립트가 켜지 않음. 먼저 켜져 있어야 함.
-# - Isaac Sim GUI도 이 스크립트가 직접 켜지 않음.
+# - TinyIoT는 이 스크립트가 직접 실행하지 않음. 먼저 실행되어 있어야 함.
+# - Isaac Sim GUI도 이 스크립트가 직접 실행하지 않음.
 # - Isaac Sim v6은 안내 문구가 뜬 뒤 Script Editor에서 직접 실행하고 Enter를 누르면 됨.
 
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# root 바로 아래에 둬도 되고 scripts/ 아래에 둬도 되게 자동 판별
+# repo root 바로 아래에 둬도 되고 scripts/ 아래에 둬도 되게 자동 판별
 if [[ -d "${SCRIPT_DIR}/fl" && -f "${SCRIPT_DIR}/clean_fl.sh" ]]; then
   ROOT_DIR="${SCRIPT_DIR}"
 else
@@ -48,7 +46,7 @@ FL_SENSOR_ROUND_POLL_SEC="${FL_SENSOR_ROUND_POLL_SEC:-0.5}"
 # 전체 validation/test stream은 줄이지 않음.
 FL_DEMO_ROUND_TRAIN_N="${FL_DEMO_ROUND_TRAIN_N:-50}"
 
-ISAAC_SCRIPT_WIN="${ISAAC_SCRIPT_WIN:-C:\\Projects\\bearing_testbed\\scripts\\isaac_femto_demo_gateway_v6.py}"
+ISAAC_SCRIPT_WIN="${ISAAC_SCRIPT_WIN:-C:\\Projects\\bearing_testbed\\scripts\\isaac_femto_demo_gateway_v7.py}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${FL_DEMO_LOG_DIR:-logs/femto_isaac_demo/${RUN_ID}}"
@@ -102,18 +100,35 @@ have_cmd() {
 }
 
 check_tinyiot() {
-  have_cmd curl || die "curl이 필요함. sudo apt install curl 로 설치해."
+  have_cmd curl || die "curl is required. Install it with: sudo apt install curl"
 
-  log "check TinyIoT: ${ONEM2M_BASE_URL}/${CSE_NAME}"
+  local url="${ONEM2M_BASE_URL}/${CSE_NAME}"
+  local http_code
+  local curl_exit
 
-  if ! curl -fsS --max-time 3 \
-    -H "X-M2M-Origin: CAdmin" \
-    -H "Accept: application/json" \
-    "${ONEM2M_BASE_URL}/${CSE_NAME}" >/dev/null; then
-    die "TinyIoT가 안 켜져 있거나 ${ONEM2M_BASE_URL}/${CSE_NAME} 접근이 안 됨. TinyIoT 먼저 켜."
+  log "Checking TinyIoT endpoint: ${url}"
+
+  set +e
+  http_code="$(
+    curl -sS --max-time 3 \
+      -o /tmp/femto_tinyiot_check_body.txt \
+      -w "%{http_code}" \
+      -H "X-M2M-Origin: CAdmin" \
+      -H "X-M2M-RVI: 2a" \
+      -H "Accept: application/json" \
+      "${url}"
+  )"
+  curl_exit=$?
+  set -e
+
+  # curl exit != 0 이면 HTTP 서버에 연결 자체가 실패한 것.
+  # HTTP 400/404는 oneM2M resource path/권한/헤더 문제일 수 있지만,
+  # 적어도 TinyIoT HTTP 서버는 응답 중이라는 뜻이므로 runner는 계속 진행한다.
+  if [[ "${curl_exit}" -ne 0 || "${http_code}" == "000" ]]; then
+    die "TinyIoT endpoint did not respond. Check that TinyIoT is running and ONEM2M_BASE_URL is correct: ${ONEM2M_BASE_URL}"
   fi
 
-  log "TinyIoT OK"
+  log "TinyIoT endpoint responded with HTTP ${http_code}; continuing."
 }
 
 wait_http_port() {
@@ -130,7 +145,7 @@ wait_http_port() {
     fi
 
     if (( $(date +%s) - start >= max_sec )); then
-      log "${name} not confirmed within ${max_sec}s: ${url}"
+      log "${name} was not confirmed within ${max_sec}s: ${url}"
       return 1
     fi
 
@@ -167,7 +182,7 @@ PY
     fi
 
     if (( $(date +%s) - start >= max_sec )); then
-      log "${name} port not confirmed within ${max_sec}s: ${port}"
+      log "${name} port was not confirmed within ${max_sec}s: ${port}"
       return 1
     fi
 
@@ -181,7 +196,7 @@ start_bg() {
 
   local logfile="${LOG_DIR}/${name}.log"
 
-  log "start ${name}"
+  log "Starting ${name}"
   log "  log: ${logfile}"
 
   (
@@ -203,7 +218,7 @@ cleanup() {
   fi
 
   if [[ ${#PIDS[@]} -gt 0 ]]; then
-    log "stopping background processes..."
+    log "Stopping background processes..."
     for pid in "${PIDS[@]}"; do
       kill "${pid}" >/dev/null 2>&1 || true
     done
@@ -215,7 +230,7 @@ cleanup() {
     done
   fi
 
-  log "logs saved: ${LOG_DIR}"
+  log "Logs saved: ${LOG_DIR}"
   exit "$code"
 }
 
@@ -225,18 +240,19 @@ print_isaac_instruction() {
   cat <<EOF
 
 ────────────────────────────────────────────────────────
-Isaac Sim v6 실행 단계
+Isaac Sim v6 step
 ────────────────────────────────────────────────────────
 
-Isaac Sim Script Editor에서 아래 코드 실행:
+Run this in Isaac Sim Script Editor:
 
 exec(open(r"${ISAAC_SCRIPT_WIN}", encoding="utf-8").read())
 
-정상 로그:
+Expected Isaac Sim log:
 [start] FEMTO Isaac synced demo started - v6
 Waiting for IN-AE FL_TRAINING round command...
 
-위 로그를 확인한 뒤 이 터미널로 돌아와 Enter를 누르면 IN-AE가 시작됨.
+After confirming that Isaac Sim is waiting, return here and press Enter.
+Then IN-AE will start.
 
 EOF
 }
@@ -251,16 +267,16 @@ main() {
   check_tinyiot
 
   if [[ ! -d "${FL_PKL_DIR}" ]]; then
-    log "warning: FL_PKL_DIR does not exist yet: ${FL_PKL_DIR}"
-    log "Isaac Sim v6가 실행되면 buffer pkl을 생성할 수 있음."
+    log "Note: FL_PKL_DIR does not exist yet: ${FL_PKL_DIR}"
+    log "Isaac Sim v6 can create the buffer pkl files when it starts."
   fi
 
   if [[ "${DO_CLEAN}" == "1" ]]; then
-    [[ -x ./clean_fl.sh ]] || die "clean_fl.sh 실행 권한이 없음. chmod +x clean_fl.sh 확인."
-    log "run clean_fl.sh"
+    [[ -x ./clean_fl.sh ]] || die "clean_fl.sh is not executable. Run: chmod +x clean_fl.sh"
+    log "Running clean_fl.sh"
     ./clean_fl.sh | tee "${LOG_DIR}/clean_fl.log"
   else
-    log "skip clean_fl.sh"
+    log "Skipping clean_fl.sh"
   fi
 
   start_bg "dashboard" env \
@@ -294,14 +310,13 @@ main() {
   print_isaac_instruction
 
   if [[ "${PROMPT_BEFORE_IN}" == "1" ]]; then
-    read -r -p "Isaac Sim v6 실행 확인 후 Enter를 누르면 IN-AE 시작: " _
+    read -r -p "Press Enter after Isaac Sim v6 is waiting for the FL round command: " _
   else
-    log "--no-prompt: start IN-AE without waiting"
+    log "--no-prompt: Starting IN-AE without manual confirmation"
   fi
 
   start_bg "in_ae" python3 -u fl/in_ae_standard.py
 
-  # in_ae 로그까지 포함해서 하나로 추적
   tail -n +1 -F \
     "${LOG_DIR}/dashboard.log" \
     "${LOG_DIR}/mn1.log" \
@@ -311,8 +326,8 @@ main() {
   TAIL_PID=$!
 
   log "IN-AE started."
-  log "대시보드: http://localhost:${DASHBOARD_PORT}"
-  log "로그 위치: ${LOG_DIR}"
+  log "Dashboard: http://localhost:${DASHBOARD_PORT}"
+  log "Log directory: ${LOG_DIR}"
 
   local in_pid="${PIDS[-1]}"
   wait "${in_pid}" || true
@@ -320,19 +335,19 @@ main() {
   log "IN-AE process finished."
 
   if [[ "${EXIT_ON_COMPLETE}" == "1" ]]; then
-    log "--exit-on-complete: stop all services"
+    log "--exit-on-complete: stopping services"
     return 0
   fi
 
   cat <<EOF
 
 ────────────────────────────────────────────────────────
-FL run 완료로 보임.
-Dashboard 최종 화면을 확인하려면 브라우저에서 유지:
+FL run appears to be complete.
+Dashboard:
   http://localhost:${DASHBOARD_PORT}
 
-종료하려면 이 터미널에서 Ctrl+C.
-로그 위치:
+Press Ctrl+C here to stop all background processes.
+Logs:
   ${LOG_DIR}
 ────────────────────────────────────────────────────────
 

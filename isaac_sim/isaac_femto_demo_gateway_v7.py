@@ -1,8 +1,8 @@
-# isaac_femto_demo_gateway_v6.py
+# isaac_femto_demo_gateway_v7.py
 # Isaac Sim 6.0.1 Script Editor에서 실행하는 최종 데모 연결 코드
 #
 # 실행:
-# exec(open(r"C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v6.py", encoding="utf-8").read())
+# exec(open(r"C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v7.py", encoding="utf-8").read())
 #
 # 중지:
 # stop_femto_demo()
@@ -16,10 +16,12 @@
 # 6. 해당 Round 구간을 시각화하고, 다음 Round 전까지 최근 구간을 반복 재생
 # 7. Dashboard에서 실제 fault alert가 감지되면 해당 node pin을 빨강으로 전환
 #
-# v5 최종 수정:
+# v7 최종 수정:
 # - idle 대기 중 마지막 구간을 반복 재생해서 정상처럼 멈춰 보이지 않게 함
 # - Round 10 시각화가 끝나면 Isaac Sim demo controller 자동 정지
-# - pin 색은 기본 초록 유지, dashboard fault alert 수신 시에만 빨강
+# - pin 색은 기본 초록 유지
+# - Dashboard /stream score 이벤트에서 score > threshold 조건을 직접 판정
+# - 3회 연속 threshold 초과 시 해당 node pin을 빨강으로 전환
 # - 이전 callback/invalid prim 오류 방어 유지
 
 from __future__ import annotations
@@ -81,6 +83,12 @@ FL_CONTROL_POLL_SEC = 0.5
 DASHBOARD_BASE_URL = "http://127.0.0.1:7000"
 DASHBOARD_STREAM_PATH = "/stream"
 DASHBOARD_POLL_SEC = 1.0
+
+# Dashboard frontend의 fault toast는 dashboard_server.py가 직접 "fault detected" 문자열을
+# 보내는 것이 아니라, /stream score 이벤트를 보고 브라우저에서 판단한다.
+# 그래서 Isaac Sim도 score > threshold를 직접 계산한다.
+DASHBOARD_ALERT_K_CONSECUTIVE = 3
+DASHBOARD_ALERT_REQUIRE_LABEL = True
 
 # False로 바꾸면 Isaac 시각화만 하고 TinyIoT publish는 안 함
 ENABLE_PUBLISH = True
@@ -372,6 +380,67 @@ def _dashboard_event_to_fault_nodes(event):
     return nodes
 
 
+def _to_float(value, default=None):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _dashboard_score_event_values(event):
+    """
+    dashboard_server.py의 /stream score 이벤트에서 node별 score/threshold/label을 뽑는다.
+
+    예상 score event:
+      {
+        "type": "score",
+        "round": 8,
+        "anomaly_active": true,
+        "mn3": 2.13,
+        "mn3_label": 1,
+        "mn3_thr": 1.91
+      }
+    """
+    if not isinstance(event, dict):
+        return {}
+
+    if str(event.get("type", "")).lower() != "score":
+        return {}
+
+    result = {}
+    fl_round = _to_int(event.get("round"), 0)
+    anomaly_active = bool(event.get("anomaly_active", False))
+
+    for node in ["mn1", "mn2", "mn3"]:
+        if node not in event:
+            continue
+
+        score = _to_float(event.get(node), None)
+        threshold = _to_float(event.get(f"{node}_thr"), None)
+        label = _to_int(event.get(f"{node}_label"), None)
+
+        if score is None or threshold is None:
+            continue
+
+        result[node] = {
+            "score": score,
+            "threshold": threshold,
+            "label": label,
+            "round": fl_round,
+            "anomaly_active": anomaly_active,
+            "is_over": score > threshold,
+        }
+
+    return result
+
+
 def _read_dashboard_json(path: str, timeout: float = 1.5):
     url = DASHBOARD_BASE_URL.rstrip("/") + path
     req = urllib.request.Request(
@@ -532,7 +601,7 @@ def build_fl_dataset(node: str, stream_data):
         "sample_rate": int(stream_data["sample_rate"]),
         "window_sec": float(stream_data["window_sec"]),
         "fault_onset_idx": int(stream_data["fault_onset_idx"]),
-        "created_by": "isaac_femto_demo_gateway_v6.py",
+        "created_by": "isaac_femto_demo_gateway_v7.py",
     }
 
 
@@ -873,6 +942,8 @@ class FEMTODemoController:
 
         # Dashboard fault alert 수신 후 pin 전환
         self.fault_alert_nodes = set()
+        self.dashboard_score_consecutive = {"mn1": 0, "mn2": 0, "mn3": 0}
+        self.dashboard_last_score_debug = {"mn1": 0.0, "mn2": 0.0, "mn3": 0.0}
         self.dashboard_thread = None
         self.dashboard_thread_stop = False
         self.next_dashboard_poll_time = 0.0
@@ -1090,6 +1161,83 @@ class FEMTODemoController:
         print(f"[dashboard alert] fault detected by dashboard: {sorted(new_nodes)}")
         print(f"[pin] red nodes now: {sorted(self.fault_alert_nodes)}")
 
+    def _process_dashboard_event(self, obj):
+        """
+        Dashboard /stream 이벤트 처리.
+
+        v6 문제:
+        - Dashboard 서버가 "Bearing Fault Detected" 문자열을 SSE로 직접 보내는 줄 알고
+          문자열/boolean alert만 찾았음.
+        - 실제로는 score event가 오고, 브라우저 대시보드가 score > threshold를 보고
+          toast를 띄우는 구조라 Isaac 쪽에서는 감지를 못 했음.
+
+        v7 수정:
+        - score event의 mn*_score, mn*_thr, mn*_label 값을 직접 비교.
+        - label==1인 fault stream에서 score > threshold가 3회 연속이면 pin 빨강.
+        """
+        explicit_nodes = _dashboard_event_to_fault_nodes(obj)
+        if explicit_nodes:
+            self._register_dashboard_fault_nodes(explicit_nodes)
+            return
+
+        score_values = _dashboard_score_event_values(obj)
+        if not score_values:
+            return
+
+        now = time.time()
+
+        for node in ["mn1", "mn2", "mn3"]:
+            values = score_values.get(node)
+            if not values:
+                continue
+
+            score = values["score"]
+            threshold = values["threshold"]
+            label = values["label"]
+            fl_round = values["round"]
+            anomaly_active = values["anomaly_active"]
+            is_over = values["is_over"]
+
+            # label이 있는 경우에는 실제 fault label 구간에서만 alert 후보로 인정.
+            # 이렇게 해야 MN1/MN2 false spike 때문에 빨개지는 걸 막을 수 있음.
+            if DASHBOARD_ALERT_REQUIRE_LABEL and label is not None:
+                label_ok = (label == 1)
+            else:
+                label_ok = True
+
+            # 현재 dashboard demo 설정상 fault stream은 anomaly_active 이후에 의미 있음.
+            active_ok = anomaly_active or (label == 1)
+
+            if is_over and label_ok and active_ok:
+                self.dashboard_score_consecutive[node] += 1
+
+                # 너무 많이 찍히지 않게 처음/확정 순간 위주로 로그.
+                if (
+                    self.dashboard_score_consecutive[node] == 1
+                    or self.dashboard_score_consecutive[node] == DASHBOARD_ALERT_K_CONSECUTIVE
+                    or now - self.dashboard_last_score_debug[node] > 3.0
+                ):
+                    print(
+                        f"[dashboard score] {node} "
+                        f"round={fl_round} "
+                        f"score={score:.4f} > thr={threshold:.4f} "
+                        f"label={label} "
+                        f"count={self.dashboard_score_consecutive[node]}/"
+                        f"{DASHBOARD_ALERT_K_CONSECUTIVE}"
+                    )
+                    self.dashboard_last_score_debug[node] = now
+
+                if self.dashboard_score_consecutive[node] >= DASHBOARD_ALERT_K_CONSECUTIVE:
+                    self._register_dashboard_fault_nodes({node})
+
+            else:
+                if self.dashboard_score_consecutive.get(node, 0) > 0:
+                    print(
+                        f"[dashboard score] {node} reset "
+                        f"score={score:.4f}, thr={threshold:.4f}, label={label}"
+                    )
+                self.dashboard_score_consecutive[node] = 0
+
     def _poll_dashboard_snapshot_if_needed(self, now: float):
         if now < self.next_dashboard_poll_time:
             return
@@ -1099,9 +1247,9 @@ class FEMTODemoController:
         for path in ["/health", "/status", "/api/status", "/api/state"]:
             try:
                 obj = _read_dashboard_json(path, timeout=0.8)
-                nodes = _dashboard_event_to_fault_nodes(obj)
-                if nodes:
-                    self._register_dashboard_fault_nodes(nodes)
+                before = set(self.fault_alert_nodes)
+                self._process_dashboard_event(obj)
+                if self.fault_alert_nodes != before:
                     return
             except Exception:
                 pass
@@ -1141,9 +1289,7 @@ class FEMTODemoController:
                         except Exception:
                             pass
 
-                        nodes = _dashboard_event_to_fault_nodes(obj)
-                        if nodes:
-                            self._register_dashboard_fault_nodes(nodes)
+                        self._process_dashboard_event(obj)
 
             except Exception:
                 # dashboard가 아직 안 켜졌거나 SSE 연결이 끊기면 잠깐 기다렸다 재연결
@@ -1250,6 +1396,8 @@ class FEMTODemoController:
         self.idle_loop_end = max(1, IDLE_LOOP_WINDOWS)
         self.idle_accum = 0.0
         self.fault_alert_nodes = set()
+        self.dashboard_score_consecutive = {"mn1": 0, "mn2": 0, "mn3": 0}
+        self.dashboard_last_score_debug = {"mn1": 0.0, "mn2": 0.0, "mn3": 0.0}
         self.next_dashboard_poll_time = 0.0
         self.dashboard_thread_stop = False
 
@@ -1258,13 +1406,13 @@ class FEMTODemoController:
         app = omni.kit.app.get_app()
         self.subscription = app.get_update_event_stream().create_subscription_to_pop(
             self.on_update,
-            name="femto_isaac_demo_gateway_v6",
+            name="femto_isaac_demo_gateway_v7",
         )
         self.running = True
         self._start_dashboard_listener()
         self._set_idle_loop_for_round()
 
-        print("[start] FEMTO Isaac synced demo started - v6")
+        print("[start] FEMTO Isaac synced demo started - v7")
         print(f"        stream_dir={self.stream_dir}")
         print(f"        buffer_dir_win={BUFFER_WRITE_DIR_WIN}")
         print(f"        buffer_dir_wsl={BUFFER_DIR_FOR_WSL}")
@@ -1273,7 +1421,7 @@ class FEMTODemoController:
         print(f"        fl-control poll={FL_CONTROL_POLL_SEC} sec")
         print(f"        publish={ENABLE_PUBLISH}")
         print("        world order: left=MN1, center=MN2, right=MN3")
-        print("        pin color: green until dashboard fault alert, then red")
+        print("        pin color: green until dashboard score alert, then red")
         print("        Waiting for IN-AE FL_TRAINING round command...")
         print("        stop command: stop_femto_demo()")
 
