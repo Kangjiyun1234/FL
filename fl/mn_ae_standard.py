@@ -452,10 +452,45 @@ class MNAETrainer:
                     end = total
 
             data_dict = dict(data_dict)
-            data_dict["train_signals"] = train_sigs[start:end]
+
+            round_train_signals = train_sigs[start:end]
+            original_round_train_n = len(round_train_signals)
+
+            # Demo fast mode:
+            # 각 round의 train window를 최대 FL_DEMO_ROUND_TRAIN_N개만 사용함.
+            # 기본값은 50. 빈 값/0/음수면 비활성화.
+            #
+            # 단순히 앞 50개만 자르면 round 내부의 앞쪽 분포만 보게 되므로,
+            # np.linspace로 round 전체 구간에서 균등 샘플링함.
+            fast_n_raw = os.getenv("FL_DEMO_ROUND_TRAIN_N", "50").strip()
+            fast_n = 0
+
+            if fast_n_raw:
+                try:
+                    fast_n = int(fast_n_raw)
+                except ValueError:
+                    fast_n = 0
+
+            if fast_n > 0 and original_round_train_n > fast_n:
+                pick = np.linspace(
+                    0,
+                    original_round_train_n - 1,
+                    fast_n,
+                    dtype=np.int64,
+                )
+                round_train_signals = round_train_signals[pick]
+                data_dict["round_train_sample_indices"] = pick.astype(np.int64)
+                print(
+                    f"    ✓ demo fast train_n "
+                    f"{original_round_train_n} -> {len(round_train_signals)}"
+                )
+
+            data_dict["train_signals"] = round_train_signals
             data_dict["active_round"] = int(round_num)
             data_dict["round_start_idx"] = int(start)
             data_dict["round_end_idx"] = int(end)
+            data_dict["round_train_n_original"] = int(original_round_train_n)
+            data_dict["round_train_n_used"] = int(len(round_train_signals))
             data_dict["sensor_meta"] = meta
 
             print(f"    ✓ round slice [{start}:{end}] ({end - start}/{total} samples)")
