@@ -1,8 +1,8 @@
-# isaac_femto_demo_gateway_v5.py
+# isaac_femto_demo_gateway_v6.py
 # Isaac Sim 6.0.1 Script Editor에서 실행하는 최종 데모 연결 코드
 #
 # 실행:
-# exec(open(r"C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v5.py", encoding="utf-8").read())
+# exec(open(r"C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v6.py", encoding="utf-8").read())
 #
 # 중지:
 # stop_femto_demo()
@@ -11,13 +11,16 @@
 # 1. C:\Projects\bearing_testbed\data\femto_replay\mn*_stream.npz 읽기
 # 2. Isaac Sim에서 MN1/MN2/MN3 시각화
 # 3. C:\Projects\bearing_testbed\data\fl_buffer\mn*.pkl runtime buffer 생성
-# 4. TinyIoT oneM2M cnt-sensor-data에 data_path + round metadata publish
+# 4. IN-AE의 cnt-fl-control/la를 감시
+# 5. FL_TRAINING Round N이 감지되면 MN1/MN2/MN3 sensor-data metadata publish
+# 6. 해당 Round 구간을 시각화하고, 다음 Round 전까지 최근 구간을 반복 재생
+# 7. Dashboard에서 실제 fault alert가 감지되면 해당 node pin을 빨강으로 전환
 #
-# v3_sync 수정:
-# - 시간 기준 publish 제거
-# - IN-AE의 cnt-fl-control/la에서 FL_TRAINING Round N을 감지했을 때만 sensor-data publish
-# - 해당 round 구간만 빠르게 시각화하고, 다음 round 전까지 shaft는 계속 회전하며 idle 유지
-# - MN-AE 쪽은 patch_mn_ae_sync_round.py 적용 권장
+# v5 최종 수정:
+# - idle 대기 중 마지막 구간을 반복 재생해서 정상처럼 멈춰 보이지 않게 함
+# - Round 10 시각화가 끝나면 Isaac Sim demo controller 자동 정지
+# - pin 색은 기본 초록 유지, dashboard fault alert 수신 시에만 빨강
+# - 이전 callback/invalid prim 오류 방어 유지
 
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import json
 import math
 import time
 import pickle
+import threading
 import urllib.request
 import urllib.error
 
@@ -62,11 +66,21 @@ TOTAL_ROUNDS = 10
 
 # Round 내부 시각화 속도.
 # 10.0이면 한 round 80개 window를 약 8초에 재생함.
-# FL이 아직 다음 round로 안 넘어가면 Isaac은 마지막 상태에서 shaft만 계속 회전하며 기다림.
 VISUAL_SPEED_WPS = 10.0
+
+# round 사이 대기 중 반복 재생할 최근 window 개수/속도.
+# 예: 마지막 24개 window를 6 windows/sec로 반복 -> 약 4초 루프.
+IDLE_LOOP_WINDOWS = 24
+IDLE_LOOP_SPEED_WPS = 6.0
 
 # fl-control polling 주기. 너무 낮추면 TinyIoT 요청이 많아짐.
 FL_CONTROL_POLL_SEC = 0.5
+
+# Dashboard fault alert 감지 설정.
+# /stream SSE를 먼저 듣고, 실패하면 /health 계열 JSON도 보조로 확인함.
+DASHBOARD_BASE_URL = "http://127.0.0.1:7000"
+DASHBOARD_STREAM_PATH = "/stream"
+DASHBOARD_POLL_SEC = 1.0
 
 # False로 바꾸면 Isaac 시각화만 하고 TinyIoT publish는 안 함
 ENABLE_PUBLISH = True
@@ -94,16 +108,12 @@ COLOR_HOUSING = (0.82, 0.84, 0.86)
 COLOR_SHAFT = (0.96, 0.96, 0.96)
 COLOR_DARK_GAP = (0.10, 0.10, 0.10)
 
-# 상태 색상은 pin에만 적용
-COLOR_PIN_NORMAL = (0.00, 0.80, 0.00)       # 초록
-COLOR_PIN_DEGRADATION = (1.00, 0.85, 0.00)  # 노랑
-COLOR_PIN_FAULT = (1.00, 0.00, 0.00)        # 빨강
-
-STATE_COLOR = {
-    STATE_NORMAL: COLOR_PIN_NORMAL,
-    STATE_DEGRADATION: COLOR_PIN_DEGRADATION,
-    STATE_FAULT: COLOR_PIN_FAULT,
-}
+# pin 색상:
+# 기본은 항상 초록.
+# Isaac 내부 상태가 DEGRADATION/FAULT여도 노랑/빨강으로 바꾸지 않음.
+# FL Dashboard에서 실제 fault alert가 감지된 node만 빨강으로 바꿈.
+COLOR_PIN_NORMAL = (0.00, 0.80, 0.00)  # 초록
+COLOR_PIN_FAULT = (1.00, 0.00, 0.00)   # 빨강
 
 # 월드 좌표 기준: 왼쪽 -> 오른쪽 = MN1, MN2, MN3
 NODE_LAYOUT = {
@@ -270,6 +280,113 @@ def get_latest_fl_command():
         # poll 실패는 데모를 죽이지 않음
         return None
 
+def _walk_json(obj):
+    """dashboard JSON/SSE event에서 문자열과 dict를 재귀적으로 훑기."""
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk_json(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_json(v)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def _normalize_node_name(value):
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in {"mn1", "mn2", "mn3"}:
+        return s
+    if s in {"1", "node1", "mn-1", "mn_1", "MN-AE-1".lower()}:
+        return "mn1"
+    if s in {"2", "node2", "mn-2", "mn_2", "MN-AE-2".lower()}:
+        return "mn2"
+    if s in {"3", "node3", "mn-3", "mn_3", "MN-AE-3".lower()}:
+        return "mn3"
+    return None
+
+
+def _dashboard_event_to_fault_nodes(event):
+    """Dashboard 응답/SSE 문구에서 실제 fault alert node를 추출."""
+    nodes = set()
+
+    # 1) dict 구조 우선 처리
+    for item in _walk_json(event):
+        if isinstance(item, dict):
+            node = (
+                _normalize_node_name(item.get("node"))
+                or _normalize_node_name(item.get("nodeId"))
+                or _normalize_node_name(item.get("target"))
+                or _normalize_node_name(item.get("name"))
+            )
+
+            bool_alert = False
+            for key in [
+                "fault_detected",
+                "faultDetected",
+                "anomaly_detected",
+                "anomalyDetected",
+                "detected",
+                "alert",
+                "isAlert",
+            ]:
+                if item.get(key) is True:
+                    bool_alert = True
+
+            status_text = " ".join(
+                str(item.get(k, ""))
+                for k in ["status", "state", "type", "event", "message", "title"]
+            ).lower()
+
+            text_alert = (
+                "bearing fault detected" in status_text
+                or "fault detected" in status_text
+                or "anomaly detected" in status_text
+                or "fault alert" in status_text
+            )
+
+            if node and (bool_alert or text_alert):
+                nodes.add(node)
+
+        elif isinstance(item, str):
+            s = item.lower()
+            # 단순 "fault_transition" 같은 설명 텍스트는 제외하고,
+            # 실제 alert/detected 표현만 fault로 인정함.
+            has_alert_word = (
+                "bearing fault detected" in s
+                or "fault detected" in s
+                or "anomaly detected" in s
+                or "fault alert" in s
+            )
+            if has_alert_word:
+                if "mn1" in s:
+                    nodes.add("mn1")
+                if "mn2" in s:
+                    nodes.add("mn2")
+                if "mn3" in s or not nodes:
+                    # 현재 데모에서 실제 고장 대상은 mn3.
+                    nodes.add("mn3")
+
+    return nodes
+
+
+def _read_dashboard_json(path: str, timeout: float = 1.5):
+    url = DASHBOARD_BASE_URL.rstrip("/") + path
+    req = urllib.request.Request(
+        url=url,
+        method="GET",
+        headers={"Accept": "application/json,text/event-stream,*/*"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+
+
 
 # =========================================================
 # 데이터 로딩 / buffer pkl 생성
@@ -415,7 +532,7 @@ def build_fl_dataset(node: str, stream_data):
         "sample_rate": int(stream_data["sample_rate"]),
         "window_sec": float(stream_data["window_sec"]),
         "fault_onset_idx": int(stream_data["fault_onset_idx"]),
-        "created_by": "isaac_femto_demo_gateway_v5.py",
+        "created_by": "isaac_femto_demo_gateway_v6.py",
     }
 
 
@@ -667,7 +784,7 @@ class NodeVisual:
 
         return {"label": label, "state": state, "rms": rms, "peak": peak}
 
-    def update_visual(self, idx: int, elapsed: float, idle: bool = False):
+    def update_visual(self, idx: int, elapsed: float, idle: bool = False, fault_alert: bool = False):
         info = self.get_state_at(idx)
 
         # 이전 실행의 callback이 남아 있거나 stage가 재생성된 경우,
@@ -686,17 +803,21 @@ class NodeVisual:
 
             rms = info["rms"]
 
-            # round 대기 중에도 화면이 완전히 멈춰 보이지 않게
-            # shaft 회전은 유지하고 vibration만 약하게 낮춤.
+            # idle 상태에서도 최근 구간을 반복하므로 RMS 기반 흔들림은 유지함.
+            # 단 idle은 active play보다 약간만 낮춰서 화면이 너무 과하지 않게 함.
             if idle:
-                amp = min(max(rms * 0.006, 0.001), 0.012)
+                amp = min(max(rms * 0.012, 0.002), 0.030)
             else:
                 amp = min(max(rms * 0.018, 0.002), 0.045)
 
             wobble = amp * math.sin(elapsed * 24.0)
             self.rotor_center_t.Set(Gf.Vec3d(0.42, 0.0, 0.89 + wobble))
 
-            set_display_color(self.pin_prim, STATE_COLOR.get(info["state"], COLOR_PIN_NORMAL))
+            # 핵심 수정:
+            # Isaac 내부 상태가 DEGRADATION/FAULT여도 pin 색은 바꾸지 않음.
+            # Dashboard에서 실제 fault alert를 받은 node만 빨강으로 바꿈.
+            pin_color = COLOR_PIN_FAULT if fault_alert else COLOR_PIN_NORMAL
+            set_display_color(self.pin_prim, pin_color)
 
         except RuntimeError as e:
             msg = str(e).lower()
@@ -742,6 +863,19 @@ class FEMTODemoController:
 
         self.next_poll_time = 0.0
         self.completed_logged = False
+
+        # idle loop: round 사이에 최근 구간을 반복해서 "정상처럼 멈춰 보이는" 문제 방지
+        self.idle_idx = 0
+        self.idle_loop_start = 0
+        self.idle_loop_end = max(1, IDLE_LOOP_WINDOWS)
+        self.idle_accum = 0.0
+        self.idle_window_interval = 1.0 / max(IDLE_LOOP_SPEED_WPS, 1e-6)
+
+        # Dashboard fault alert 수신 후 pin 전환
+        self.fault_alert_nodes = set()
+        self.dashboard_thread = None
+        self.dashboard_thread_stop = False
+        self.next_dashboard_poll_time = 0.0
 
     def load_streams(self):
         loaded = {}
@@ -834,6 +968,8 @@ class FEMTODemoController:
         self.visual_idx = start_idx
         self.current_display_idx = start_idx
         self.round_active = True
+        self.accum = 0.0
+        self.idle_accum = 0.0
 
         self.expected_next_round = round_num + 1
 
@@ -855,8 +991,14 @@ class FEMTODemoController:
 
         if state == "FL_COMPLETED":
             if not self.completed_logged:
-                print("\n[sync] FL_COMPLETED detected. Isaac remains in idle visual state.")
+                print("\n[sync] FL_COMPLETED detected.")
                 self.completed_logged = True
+
+            # R10 시각화까지 끝났으면 controller 정지.
+            # R10 시각화 중이면 끝난 뒤 on_update에서 정지함.
+            if self.current_round >= TOTAL_ROUNDS and not self.round_active:
+                print("[stop] FL completed and R10 visual already finished.")
+                self.stop(silent=True)
             return
 
         if state != "FL_TRAINING":
@@ -889,7 +1031,133 @@ class FEMTODemoController:
 
     def update_all_nodes(self, idle: bool):
         for name in ["mn1", "mn2", "mn3"]:
-            self.nodes[name].update_visual(self.current_display_idx, self.elapsed, idle=idle)
+            node_visual = self.nodes.get(name)
+            if node_visual is not None:
+                node_visual.update_visual(
+                    self.current_display_idx,
+                    self.elapsed,
+                    idle=idle,
+                    fault_alert=(name in self.fault_alert_nodes),
+                )
+
+    def _set_idle_loop_for_round(self):
+        if self.current_round <= 0:
+            self.idle_loop_start = 0
+            self.idle_loop_end = min(IDLE_LOOP_WINDOWS, self.max_windows)
+        else:
+            self.idle_loop_start = max(self.round_start_idx, self.round_end_idx - IDLE_LOOP_WINDOWS)
+            self.idle_loop_end = max(self.idle_loop_start + 1, self.round_end_idx)
+
+        self.idle_idx = self.idle_loop_start
+        self.idle_accum = 0.0
+
+        print(
+            f"[visual idle-loop] repeat idx "
+            f"{self.idle_loop_start}:{self.idle_loop_end} "
+            f"at {IDLE_LOOP_SPEED_WPS} windows/sec"
+        )
+
+    def _advance_idle_loop_if_needed(self, dt: float):
+        if self.round_active:
+            return
+
+        if self.max_windows <= 0:
+            self.current_display_idx = 0
+            return
+
+        self.idle_accum += dt
+        if self.idle_accum < self.idle_window_interval:
+            return
+
+        self.idle_accum = 0.0
+
+        if self.idle_loop_end <= self.idle_loop_start:
+            self.idle_loop_start = 0
+            self.idle_loop_end = min(IDLE_LOOP_WINDOWS, self.max_windows)
+
+        self.current_display_idx = self.idle_idx
+        self.idle_idx += 1
+
+        if self.idle_idx >= self.idle_loop_end:
+            self.idle_idx = self.idle_loop_start
+
+    def _register_dashboard_fault_nodes(self, nodes):
+        new_nodes = set(nodes) - self.fault_alert_nodes
+        if not new_nodes:
+            return
+
+        self.fault_alert_nodes.update(new_nodes)
+        print(f"[dashboard alert] fault detected by dashboard: {sorted(new_nodes)}")
+        print(f"[pin] red nodes now: {sorted(self.fault_alert_nodes)}")
+
+    def _poll_dashboard_snapshot_if_needed(self, now: float):
+        if now < self.next_dashboard_poll_time:
+            return
+
+        self.next_dashboard_poll_time = now + DASHBOARD_POLL_SEC
+
+        for path in ["/health", "/status", "/api/status", "/api/state"]:
+            try:
+                obj = _read_dashboard_json(path, timeout=0.8)
+                nodes = _dashboard_event_to_fault_nodes(obj)
+                if nodes:
+                    self._register_dashboard_fault_nodes(nodes)
+                    return
+            except Exception:
+                pass
+
+    def _dashboard_stream_worker(self):
+        """Dashboard /stream SSE에서 fault alert 이벤트를 들음."""
+        stream_url = DASHBOARD_BASE_URL.rstrip("/") + DASHBOARD_STREAM_PATH
+
+        while not self.dashboard_thread_stop:
+            try:
+                req = urllib.request.Request(
+                    url=stream_url,
+                    method="GET",
+                    headers={"Accept": "text/event-stream"},
+                )
+
+                with urllib.request.urlopen(req, timeout=10.0) as resp:
+                    for raw_line in resp:
+                        if self.dashboard_thread_stop:
+                            return
+
+                        try:
+                            line = raw_line.decode("utf-8", errors="ignore").strip()
+                        except Exception:
+                            continue
+
+                        if not line:
+                            continue
+
+                        payload = line
+                        if line.startswith("data:"):
+                            payload = line[5:].strip()
+
+                        obj = payload
+                        try:
+                            obj = json.loads(payload)
+                        except Exception:
+                            pass
+
+                        nodes = _dashboard_event_to_fault_nodes(obj)
+                        if nodes:
+                            self._register_dashboard_fault_nodes(nodes)
+
+            except Exception:
+                # dashboard가 아직 안 켜졌거나 SSE 연결이 끊기면 잠깐 기다렸다 재연결
+                time.sleep(1.0)
+
+    def _start_dashboard_listener(self):
+        self.dashboard_thread_stop = False
+        self.dashboard_thread = threading.Thread(
+            target=self._dashboard_stream_worker,
+            name="femto_dashboard_stream_listener",
+            daemon=True,
+        )
+        self.dashboard_thread.start()
+        print(f"[dashboard] listening {DASHBOARD_BASE_URL}{DASHBOARD_STREAM_PATH}")
 
     def on_update(self, event):
         if not self.running:
@@ -903,16 +1171,20 @@ class FEMTODemoController:
         self.accum += dt
 
         self.poll_fl_control_if_needed(now)
+        self._poll_dashboard_snapshot_if_needed(now)
 
         idle = not self.round_active
 
-        # 매 프레임 회전은 계속함. round 대기 중에도 멈춰 보이지 않게 유지.
-        self.update_all_nodes(idle=idle)
-
-        if not self.round_active:
+        if idle:
+            # round 사이 대기 중에도 마지막 구간을 반복 재생해서
+            # 상태/진동이 완전히 정상처럼 멈춰 보이지 않게 함.
+            self._advance_idle_loop_if_needed(dt)
+            self.update_all_nodes(idle=True)
             return
 
+        # active round 시각화
         if self.accum < self.window_interval:
+            self.update_all_nodes(idle=False)
             return
 
         self.accum = 0.0
@@ -920,24 +1192,39 @@ class FEMTODemoController:
         if self.visual_idx % 20 == 0:
             print(f"\n[visual] R{self.current_round} idx={self.visual_idx}")
             for name in ["mn1", "mn2", "mn3"]:
-                info = self.nodes[name].update_visual(self.visual_idx, self.elapsed, idle=False)
+                info = self.nodes[name].update_visual(
+                    self.visual_idx,
+                    self.elapsed,
+                    idle=False,
+                    fault_alert=(name in self.fault_alert_nodes),
+                )
                 print(
                     f"  {name}: {STATE_NAME[info['state']]:<12} "
                     f"label={info['label']} "
                     f"rms={info['rms']:.4f} "
-                    f"peak={info['peak']:.4f}"
+                    f"peak={info['peak']:.4f} "
+                    f"pin={'RED' if name in self.fault_alert_nodes else 'GREEN'}"
                 )
 
         self.current_display_idx = self.visual_idx
+        self.update_all_nodes(idle=False)
         self.visual_idx += 1
 
         if self.visual_idx >= self.round_end_idx:
             self.current_display_idx = max(self.round_end_idx - 1, 0)
             self.round_active = False
+
+            if self.current_round >= TOTAL_ROUNDS:
+                print("[visual done] R10 visual finished.")
+                print("[stop] FEMTO Isaac demo stopped after final round.")
+                self.stop(silent=True)
+                return
+
             print(
                 f"[visual idle] R{self.current_round} visual finished. "
                 "Waiting for next FL round command..."
             )
+            self._set_idle_loop_for_round()
 
     def start(self):
         self.stop(silent=True)
@@ -958,16 +1245,26 @@ class FEMTODemoController:
         self.next_poll_time = 0.0
         self.completed_logged = False
 
+        self.idle_idx = 0
+        self.idle_loop_start = 0
+        self.idle_loop_end = max(1, IDLE_LOOP_WINDOWS)
+        self.idle_accum = 0.0
+        self.fault_alert_nodes = set()
+        self.next_dashboard_poll_time = 0.0
+        self.dashboard_thread_stop = False
+
         self.build_scene()
 
         app = omni.kit.app.get_app()
         self.subscription = app.get_update_event_stream().create_subscription_to_pop(
             self.on_update,
-            name="femto_isaac_demo_gateway_v5",
+            name="femto_isaac_demo_gateway_v6",
         )
         self.running = True
+        self._start_dashboard_listener()
+        self._set_idle_loop_for_round()
 
-        print("[start] FEMTO Isaac synced demo started - v5")
+        print("[start] FEMTO Isaac synced demo started - v6")
         print(f"        stream_dir={self.stream_dir}")
         print(f"        buffer_dir_win={BUFFER_WRITE_DIR_WIN}")
         print(f"        buffer_dir_wsl={BUFFER_DIR_FOR_WSL}")
@@ -976,7 +1273,7 @@ class FEMTODemoController:
         print(f"        fl-control poll={FL_CONTROL_POLL_SEC} sec")
         print(f"        publish={ENABLE_PUBLISH}")
         print("        world order: left=MN1, center=MN2, right=MN3")
-        print("        pin color: green=NORMAL, yellow=DEGRADATION, red=FAULT")
+        print("        pin color: green until dashboard fault alert, then red")
         print("        Waiting for IN-AE FL_TRAINING round command...")
         print("        stop command: stop_femto_demo()")
 
@@ -988,6 +1285,7 @@ class FEMTODemoController:
                 pass
 
         self.running = False
+        self.dashboard_thread_stop = True
 
         if not silent:
             print("[stop] FEMTO Isaac synced demo stopped")

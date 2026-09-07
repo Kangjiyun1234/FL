@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# scripts/run_femto_isaac_demo.sh
+# run_femto_isaac_demo.sh
 #
 # FEMTO-Isaac Sim FL demo runner
 #
 # 실행:
+#   ./run_femto_isaac_demo.sh
+# 또는 scripts 아래에 둔 경우:
 #   ./scripts/run_femto_isaac_demo.sh
 #
 # 옵션:
-#   ./scripts/run_femto_isaac_demo.sh --skip-clean
-#   ./scripts/run_femto_isaac_demo.sh --no-prompt
-#   ./scripts/run_femto_isaac_demo.sh --exit-on-complete
-#   ./scripts/run_femto_isaac_demo.sh --full-train
+#   ./run_femto_isaac_demo.sh --skip-clean
+#   ./run_femto_isaac_demo.sh --no-prompt
+#   ./run_femto_isaac_demo.sh --exit-on-complete
+#   ./run_femto_isaac_demo.sh --full-train
 #
 # 주의:
 # - TinyIoT는 이 스크립트가 켜지 않음. 먼저 켜져 있어야 함.
 # - Isaac Sim GUI도 이 스크립트가 직접 켜지 않음.
-# - 이 스크립트는 Dashboard, MN-AE 3개, IN-AE를 한 터미널에서 관리함.
 # - Isaac Sim v6은 안내 문구가 뜬 뒤 Script Editor에서 직접 실행하고 Enter를 누르면 됨.
 
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# root 바로 아래에 둬도 되고 scripts/ 아래에 둬도 되게 자동 판별
+if [[ -d "${SCRIPT_DIR}/fl" && -f "${SCRIPT_DIR}/clean_fl.sh" ]]; then
+  ROOT_DIR="${SCRIPT_DIR}"
+else
+  ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+
 cd "$ROOT_DIR"
 
 ONEM2M_BASE_URL="${ONEM2M_BASE_URL:-http://127.0.0.1:3000}"
@@ -35,7 +44,7 @@ FL_PKL_DIR="${FL_PKL_DIR:-/mnt/c/Projects/bearing_testbed/data/fl_buffer}"
 FL_SENSOR_ROUND_WAIT_SEC="${FL_SENSOR_ROUND_WAIT_SEC:-90}"
 FL_SENSOR_ROUND_POLL_SEC="${FL_SENSOR_ROUND_POLL_SEC:-0.5}"
 
-# demo 시간 단축용. 각 round train 80개 중 50개만 균등 샘플링.
+# demo 시간 단축용. 각 round train 80개 중 기본 50개만 균등 샘플링.
 # 전체 validation/test stream은 줄이지 않음.
 FL_DEMO_ROUND_TRAIN_N="${FL_DEMO_ROUND_TRAIN_N:-50}"
 
@@ -63,7 +72,7 @@ for arg in "$@"; do
       FL_DEMO_ROUND_TRAIN_N=0
       ;;
     -h|--help)
-      sed -n '1,55p' "$0"
+      sed -n '1,65p' "$0"
       exit 0
       ;;
     *)
@@ -224,7 +233,7 @@ Isaac Sim Script Editor에서 아래 코드 실행:
 exec(open(r"${ISAAC_SCRIPT_WIN}", encoding="utf-8").read())
 
 정상 로그:
-[start] FEMTO Isaac synced demo started
+[start] FEMTO Isaac synced demo started - v6
 Waiting for IN-AE FL_TRAINING round command...
 
 위 로그를 확인한 뒤 이 터미널로 돌아와 Enter를 누르면 IN-AE가 시작됨.
@@ -282,14 +291,6 @@ main() {
   wait_port_open "mn2" "${MN2_PORT}" 30 || true
   wait_port_open "mn3" "${MN3_PORT}" 30 || true
 
-  tail -n +1 -F \
-    "${LOG_DIR}/dashboard.log" \
-    "${LOG_DIR}/mn1.log" \
-    "${LOG_DIR}/mn2.log" \
-    "${LOG_DIR}/mn3.log" \
-    > "${LOG_DIR}/combined.follow.log" 2>/dev/null &
-  TAIL_PID=$!
-
   print_isaac_instruction
 
   if [[ "${PROMPT_BEFORE_IN}" == "1" ]]; then
@@ -300,15 +301,20 @@ main() {
 
   start_bg "in_ae" python3 -u fl/in_ae_standard.py
 
+  # in_ae 로그까지 포함해서 하나로 추적
+  tail -n +1 -F \
+    "${LOG_DIR}/dashboard.log" \
+    "${LOG_DIR}/mn1.log" \
+    "${LOG_DIR}/mn2.log" \
+    "${LOG_DIR}/mn3.log" \
+    "${LOG_DIR}/in_ae.log" &
+  TAIL_PID=$!
+
   log "IN-AE started."
   log "대시보드: http://localhost:${DASHBOARD_PORT}"
-  log "실시간 로그 확인:"
-  log "  tail -f ${LOG_DIR}/in_ae.log"
-  log "  tail -f ${LOG_DIR}/dashboard.log"
-  log "  tail -f ${LOG_DIR}/mn1.log ${LOG_DIR}/mn2.log ${LOG_DIR}/mn3.log"
+  log "로그 위치: ${LOG_DIR}"
 
   local in_pid="${PIDS[-1]}"
-
   wait "${in_pid}" || true
 
   log "IN-AE process finished."
