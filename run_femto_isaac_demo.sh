@@ -15,13 +15,14 @@
 # 주의:
 # - TinyIoT는 이 스크립트가 직접 실행하지 않음. 먼저 실행되어 있어야 함.
 # - Isaac Sim GUI도 이 스크립트가 직접 실행하지 않음.
-# - Isaac Sim v6은 안내 문구가 뜬 뒤 Script Editor에서 직접 실행하고 Enter를 누르면 됨.
+# - Isaac Sim v7은 안내 문구가 뜬 뒤 Script Editor에서 직접 실행하고 Enter를 누르면 됨.
+# - 이 runner는 Isaac replay demo 전용 reset을 사용함.
+#   기존 clean_fl.sh처럼 /tmp/fl_data/femto/mn*.pkl을 요구하거나 fl/data_generator.py를 실행하지 않음.
 
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# repo root 바로 아래에 둬도 되고 scripts/ 아래에 둬도 되게 자동 판별
 if [[ -d "${SCRIPT_DIR}/fl" && -f "${SCRIPT_DIR}/clean_fl.sh" ]]; then
   ROOT_DIR="${SCRIPT_DIR}"
 else
@@ -38,12 +39,14 @@ MN1_PORT="${MN1_PORT:-5001}"
 MN2_PORT="${MN2_PORT:-5002}"
 MN3_PORT="${MN3_PORT:-5003}"
 
+FEMTO_REPLAY_DIR="${FEMTO_REPLAY_DIR:-/mnt/c/Projects/bearing_testbed/data/femto_replay}"
 FL_PKL_DIR="${FL_PKL_DIR:-/mnt/c/Projects/bearing_testbed/data/fl_buffer}"
+
+FL_MODEL_BASE_DIR="${FL_MODEL_BASE_DIR:-/tmp/fl_models}"
+FL_DEMO_RUN_MARKER="${FL_DEMO_RUN_MARKER:-${FL_MODEL_BASE_DIR}/.demo_run_started}"
+
 FL_SENSOR_ROUND_WAIT_SEC="${FL_SENSOR_ROUND_WAIT_SEC:-90}"
 FL_SENSOR_ROUND_POLL_SEC="${FL_SENSOR_ROUND_POLL_SEC:-0.5}"
-
-# demo 시간 단축용. 각 round train 80개 중 기본 50개만 균등 샘플링.
-# 전체 validation/test stream은 줄이지 않음.
 FL_DEMO_ROUND_TRAIN_N="${FL_DEMO_ROUND_TRAIN_N:-50}"
 
 ISAAC_SCRIPT_WIN="${ISAAC_SCRIPT_WIN:-C:\\Projects\\bearing_testbed\\scripts\\isaac_femto_demo_gateway_v7.py}"
@@ -70,7 +73,7 @@ for arg in "$@"; do
       FL_DEMO_ROUND_TRAIN_N=0
       ;;
     -h|--help)
-      sed -n '1,65p' "$0"
+      sed -n '1,75p' "$0"
       exit 0
       ;;
     *)
@@ -111,7 +114,7 @@ check_tinyiot() {
   set +e
   http_code="$(
     curl -sS --max-time 3 \
-      -o /tmp/femto_tinyiot_check_body.txt \
+      -o "${LOG_DIR}/tinyiot_check_body.txt" \
       -w "%{http_code}" \
       -H "X-M2M-Origin: CAdmin" \
       -H "X-M2M-RVI: 2a" \
@@ -121,14 +124,83 @@ check_tinyiot() {
   curl_exit=$?
   set -e
 
-  # curl exit != 0 이면 HTTP 서버에 연결 자체가 실패한 것.
-  # HTTP 400/404는 oneM2M resource path/권한/헤더 문제일 수 있지만,
-  # 적어도 TinyIoT HTTP 서버는 응답 중이라는 뜻이므로 runner는 계속 진행한다.
   if [[ "${curl_exit}" -ne 0 || "${http_code}" == "000" ]]; then
-    die "TinyIoT endpoint did not respond. Check that TinyIoT is running and ONEM2M_BASE_URL is correct: ${ONEM2M_BASE_URL}"
+    die "TinyIoT endpoint did not respond. Check ONEM2M_BASE_URL=${ONEM2M_BASE_URL}"
   fi
 
   log "TinyIoT endpoint responded with HTTP ${http_code}; continuing."
+}
+
+check_replay_streams() {
+  log "Checking FEMTO replay stream files: ${FEMTO_REPLAY_DIR}"
+
+  local missing=0
+  for node in mn1 mn2 mn3; do
+    local f="${FEMTO_REPLAY_DIR}/${node}_stream.npz"
+    if [[ ! -f "${f}" ]]; then
+      log "Missing: ${f}"
+      missing=1
+    else
+      log "  OK ${f}"
+    fi
+  done
+
+  if [[ "${missing}" == "1" ]]; then
+    die "FEMTO replay stream files are missing. Run prepare_data_femto_replay.py and copy *_stream.npz to ${FEMTO_REPLAY_DIR}"
+  fi
+}
+
+reset_demo_state() {
+  log "Resetting FEMTO-Isaac demo state"
+
+  {
+    echo "============================================================"
+    echo "FEMTO-Isaac demo reset"
+    echo "============================================================"
+
+    echo
+    echo "[1/4] Stop previous FL/Dashboard processes"
+    pkill -TERM -f "fl/dashboard_server.py" 2>/dev/null || true
+    pkill -TERM -f "fl/in_ae_standard.py" 2>/dev/null || true
+    pkill -TERM -f "fl/mn_ae_standard.py" 2>/dev/null || true
+    sleep 2
+    pkill -KILL -f "fl/dashboard_server.py" 2>/dev/null || true
+    pkill -KILL -f "fl/in_ae_standard.py" 2>/dev/null || true
+    pkill -KILL -f "fl/mn_ae_standard.py" 2>/dev/null || true
+    echo "  OK processes stopped"
+
+    echo
+    echo "[2/4] Clear model/cache directories"
+    rm -rf "${FL_MODEL_BASE_DIR}/global"
+    rm -rf "${FL_MODEL_BASE_DIR}/local"
+    rm -rf "${FL_MODEL_BASE_DIR}/cache"
+    rm -f "${FL_DEMO_RUN_MARKER}"
+
+    mkdir -p "${FL_MODEL_BASE_DIR}/global"
+    mkdir -p "${FL_MODEL_BASE_DIR}/local"
+    mkdir -p "${FL_MODEL_BASE_DIR}/cache"
+    echo "  OK ${FL_MODEL_BASE_DIR}/global"
+    echo "  OK ${FL_MODEL_BASE_DIR}/local"
+    echo "  OK ${FL_MODEL_BASE_DIR}/cache"
+
+    echo
+    echo "[3/4] Recreate TinyIoT oneM2M resources"
+    python3 fl/setup_resources_standard.py --clean
+
+    echo
+    echo "[4/4] Create demo run marker"
+    mkdir -p "$(dirname "${FL_DEMO_RUN_MARKER}")"
+    touch "${FL_DEMO_RUN_MARKER}"
+    echo "  OK ${FL_DEMO_RUN_MARKER}"
+
+    echo
+    echo "============================================================"
+    echo "FEMTO-Isaac demo reset complete"
+    echo "============================================================"
+    echo "Note: sensor-data metadata will be published by Isaac Sim v7."
+    echo "      This runner intentionally does not call fl/data_generator.py."
+    echo "============================================================"
+  } | tee "${LOG_DIR}/demo_reset.log"
 }
 
 wait_http_port() {
@@ -240,7 +312,7 @@ print_isaac_instruction() {
   cat <<EOF
 
 ────────────────────────────────────────────────────────
-Isaac Sim v6 step
+Isaac Sim v7 step
 ────────────────────────────────────────────────────────
 
 Run this in Isaac Sim Script Editor:
@@ -248,7 +320,7 @@ Run this in Isaac Sim Script Editor:
 exec(open(r"${ISAAC_SCRIPT_WIN}", encoding="utf-8").read())
 
 Expected Isaac Sim log:
-[start] FEMTO Isaac synced demo started - v6
+[start] FEMTO Isaac synced demo started - v7
 Waiting for IN-AE FL_TRAINING round command...
 
 After confirming that Isaac Sim is waiting, return here and press Enter.
@@ -260,23 +332,23 @@ EOF
 main() {
   log "root: ${ROOT_DIR}"
   log "logs: ${LOG_DIR}"
+  log "FEMTO_REPLAY_DIR: ${FEMTO_REPLAY_DIR}"
   log "FL_PKL_DIR: ${FL_PKL_DIR}"
   log "FL_DEMO_ROUND_TRAIN_N: ${FL_DEMO_ROUND_TRAIN_N}"
   log "Isaac script: ${ISAAC_SCRIPT_WIN}"
 
   check_tinyiot
+  check_replay_streams
 
   if [[ ! -d "${FL_PKL_DIR}" ]]; then
     log "Note: FL_PKL_DIR does not exist yet: ${FL_PKL_DIR}"
-    log "Isaac Sim v6 can create the buffer pkl files when it starts."
+    log "Isaac Sim v7 can create the buffer pkl files when it starts."
   fi
 
   if [[ "${DO_CLEAN}" == "1" ]]; then
-    [[ -x ./clean_fl.sh ]] || die "clean_fl.sh is not executable. Run: chmod +x clean_fl.sh"
-    log "Running clean_fl.sh"
-    ./clean_fl.sh | tee "${LOG_DIR}/clean_fl.log"
+    reset_demo_state
   else
-    log "Skipping clean_fl.sh"
+    log "Skipping demo reset"
   fi
 
   start_bg "dashboard" env \
@@ -310,7 +382,7 @@ main() {
   print_isaac_instruction
 
   if [[ "${PROMPT_BEFORE_IN}" == "1" ]]; then
-    read -r -p "Press Enter after Isaac Sim v6 is waiting for the FL round command: " _
+    read -r -p "Press Enter after Isaac Sim v7 is waiting for the FL round command: " _
   else
     log "--no-prompt: Starting IN-AE without manual confirmation"
   fi
