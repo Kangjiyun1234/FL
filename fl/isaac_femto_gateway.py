@@ -36,7 +36,7 @@ NODE_INDEX = {"mn1": 0, "mn2": 1, "mn3": 2}
 NODE_AE = {"mn1": "MN-AE-1", "mn2": "MN-AE-2", "mn3": "MN-AE-3"}
 
 GLOBAL_ROUNDS = int(os.getenv("FL_GLOBAL_ROUNDS", "10"))
-WINDOWS_PER_ROUND = int(os.getenv("ISAAC_WINDOWS_PER_ROUND", "80"))
+WINDOWS_PER_ROUND = int(os.getenv("ISAAC_WINDOWS_PER_ROUND", "50"))
 
 # Isaac Sim이 Windows에서 돌 때 기본 경로
 WIN_STREAM_DIR = Path(
@@ -388,7 +388,7 @@ def main() -> None:
         print("\n--once 모드: buffer 생성만 하고 종료합니다.")
         return
 
-    # 10 round 기준으로 stream을 80개씩 보여주고 metadata publish
+    # 10 round 기준으로 stream을 50개씩 보여주고 metadata publish
     for round_num in range(1, GLOBAL_ROUNDS + 1):
         start_idx = (round_num - 1) * WINDOWS_PER_ROUND
         end_idx = min(round_num * WINDOWS_PER_ROUND, int(streams["mn1"]["test_stream_windows"].shape[0]))
