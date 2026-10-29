@@ -207,19 +207,35 @@ class MNAETrainer:
         time.sleep(1)
         print(f"  ✓ {self.node_name} Notification server on port {self.notification_port}")
 
-    @staticmethod
-    def _is_expected_command(command: dict | None, round_num: int) -> bool:
+    def _is_expected_command(self, command: dict | None, round_num: int) -> bool:
         if not isinstance(command, dict):
             return False
 
         state = str(command.get("jobState", ""))
-        try:
-            current_round = int(command.get("currentRound", 0))
-        except (TypeError, ValueError):
-            return False
 
+        try:
+            current_round = int(command.get("currentRound", command.get("round", 0)))
+        except (TypeError, ValueError):
+            current_round = 0
+
+        # 핵심 수정:
+        # 새 실행에서 MN-AE가 Round 1을 기다리는 중인데,
+        # TinyIoT cnt-fl-control/la에 이전 실행의 FL_COMPLETED가 남아 있으면
+        # 그걸 새 실행 완료로 착각하고 종료하는 문제가 생김.
+        #
+        # 따라서 Round 1 대기 중에는 FL_COMPLETED를 expected command로 인정하지 않음.
+        # Round 1은 반드시 FL_TRAINING/currentRound=1로 시작해야 함.
         if state == "FL_COMPLETED":
-            return True
+            if round_num == 1:
+                print(
+                    f"  ⚠ {self.node_name}: ignore stale FL_COMPLETED "
+                    f"while waiting Round 1"
+                )
+                return False
+
+            # Round 2 이후에는 실제 완료 신호일 수 있으므로 허용.
+            # 단, round 정보가 이상하면 무시함.
+            return current_round >= round_num
 
         return (
             state == "FL_TRAINING"
@@ -314,49 +330,175 @@ class MNAETrainer:
     def _load_sensor_data_for_round(self, round_num: int, max_attempts: int = 3):
         print(f"\n  [{self.node_name}] load sensor data for round_{round_num} ...")
 
-        # TinyIoT discovery가 라벨 기반 검색을 지원하지 않으므로 /la (최신 CIN) 사용.
-        # data_generator.py가 모든 라운드에 동일한 pkl 경로를 publish하므로 문제없음.
+        # Isaac Sim sync demo에서는 race condition을 막기 위해
+        # cnt-sensor-data/la가 현재 round와 일치할 때까지 기다림.
+        #
+        # 기존 문제:
+        # IN-AE가 Round N 명령을 publish하는 순간 MN-AE와 Isaac Sim이 동시에 반응함.
+        # MN-AE가 Isaac Sim의 sensor-data publish보다 먼저 /la를 읽으면
+        # 이전 round metadata를 읽을 수 있음.
+        #
+        # 수정:
+        # meta.round == round_num 또는 meta.currentRound == round_num 일 때만 사용.
+        wait_total_sec = float(os.getenv("FL_SENSOR_ROUND_WAIT_SEC", "90"))
+        poll_sec = float(os.getenv("FL_SENSOR_ROUND_POLL_SEC", "0.5"))
+        allow_legacy_without_round = (
+            os.getenv("FL_ALLOW_SENSOR_META_WITHOUT_ROUND", "0") == "1"
+        )
+
+        deadline = time.time() + wait_total_sec
+        next_log_time = 0.0
+        last_seen_round = None
         cin = None
-        for attempt in range(1, max_attempts + 1):
+        meta = None
+
+        while True:
             cin = om2m.get_latest_content_instance(self.sensor_data_path)
+
             if cin and "m2m:cin" in cin:
-                break
-            if attempt < max_attempts:
-                wait_sec = 1.5 * attempt
-                print(f"    ⚠ no data yet (attempt {attempt}/{max_attempts})"
-                      f" -> retry in {wait_sec:.1f}s")
-                time.sleep(wait_sec)
+                con = cin["m2m:cin"].get("con")
+                try:
+                    candidate = json.loads(con) if isinstance(con, str) else con
+                except Exception:
+                    candidate = None
 
-        if not cin or "m2m:cin" not in cin:
-            print(f"    ✗ no sensor data in {self.sensor_data_path}")
-            return None
+                if isinstance(candidate, dict):
+                    meta_round_raw = candidate.get(
+                        "round",
+                        candidate.get("currentRound", None)
+                    )
 
-        con       = cin["m2m:cin"]["con"]
-        meta      = json.loads(con) if isinstance(con, str) else con
+                    if meta_round_raw is None:
+                        last_seen_round = "missing"
+                        if allow_legacy_without_round:
+                            meta = candidate
+                            print(
+                                "    ⚠ sensor-data has no round field; "
+                                "use legacy metadata because "
+                                "FL_ALLOW_SENSOR_META_WITHOUT_ROUND=1"
+                            )
+                            break
+                    else:
+                        try:
+                            meta_round = int(meta_round_raw)
+                        except (TypeError, ValueError):
+                            meta_round = None
+
+                        last_seen_round = meta_round
+
+                        if meta_round == round_num:
+                            meta = candidate
+                            print(f"    ✓ matched sensor-data round={meta_round}")
+                            break
+
+            now = time.time()
+            if now >= deadline:
+                print(
+                    f"    ✗ sensor-data round mismatch timeout: "
+                    f"expected={round_num}, last_seen={last_seen_round}, "
+                    f"waited={wait_total_sec:.1f}s"
+                )
+                return None
+
+            if now >= next_log_time:
+                remain = max(0.0, deadline - now)
+                print(
+                    f"    ⏳ wait Isaac sensor-data round={round_num} "
+                    f"(last_seen={last_seen_round}, remain={remain:.1f}s)"
+                )
+                next_log_time = now + 5.0
+
+            time.sleep(poll_sec)
+
         data_path = meta.get("data_path")
-
         if not data_path or not os.path.exists(data_path):
             print(f"    ✗ data_path not found: {data_path}")
             return None
 
+        print(f"    ✓ data_path={data_path}")
+
         with open(data_path, "rb") as f:
             data_dict = pickle.load(f)
 
-        # 시나리오: 하루 1라운드, 매 라운드 새로운 데이터 수집
-        # train_signals 전체를 GLOBAL_ROUNDS 등분하여 해당 라운드 슬라이스만 사용
         train_sigs = data_dict.get("train_signals", np.array([]))
         total = len(train_sigs)
-        if total > 0 and config.GLOBAL_ROUNDS > 1:
-            n_per_round = max(1, total // config.GLOBAL_ROUNDS)
-            start = (round_num - 1) * n_per_round
-            end   = total if round_num >= config.GLOBAL_ROUNDS else start + n_per_round
+
+        if total > 0:
+            # Isaac Sim이 publish한 metadata의 start_idx/end_idx를 우선 사용함.
+            # 없으면 기존 방식처럼 GLOBAL_ROUNDS 기준으로 등분함.
+            start = None
+            end = None
+
+            try:
+                meta_start = meta.get("start_idx", None)
+                meta_end = meta.get("end_idx", None)
+                if meta_start is not None and meta_end is not None:
+                    meta_start = int(meta_start)
+                    meta_end = int(meta_end)
+                    if 0 <= meta_start < meta_end <= total:
+                        start = meta_start
+                        end = meta_end
+            except Exception:
+                start = None
+                end = None
+
+            if start is None or end is None:
+                if config.GLOBAL_ROUNDS > 1:
+                    n_per_round = max(1, total // config.GLOBAL_ROUNDS)
+                    start = (round_num - 1) * n_per_round
+                    end = total if round_num >= config.GLOBAL_ROUNDS else start + n_per_round
+                else:
+                    start = 0
+                    end = total
+
             data_dict = dict(data_dict)
-            data_dict["train_signals"] = train_sigs[start:end]
+
+            round_train_signals = train_sigs[start:end]
+            original_round_train_n = len(round_train_signals)
+
+            # Demo fast mode:
+            # 각 round의 train window를 최대 FL_DEMO_ROUND_TRAIN_N개만 사용함.
+            # 기본값은 50. 빈 값/0/음수면 비활성화.
+            #
+            # 단순히 앞 50개만 자르면 round 내부의 앞쪽 분포만 보게 되므로,
+            # np.linspace로 round 전체 구간에서 균등 샘플링함.
+            fast_n_raw = os.getenv("FL_DEMO_ROUND_TRAIN_N", "50").strip()
+            fast_n = 0
+
+            if fast_n_raw:
+                try:
+                    fast_n = int(fast_n_raw)
+                except ValueError:
+                    fast_n = 0
+
+            if fast_n > 0 and original_round_train_n > fast_n:
+                pick = np.linspace(
+                    0,
+                    original_round_train_n - 1,
+                    fast_n,
+                    dtype=np.int64,
+                )
+                round_train_signals = round_train_signals[pick]
+                data_dict["round_train_sample_indices"] = pick.astype(np.int64)
+                print(
+                    f"    ✓ demo fast train_n "
+                    f"{original_round_train_n} -> {len(round_train_signals)}"
+                )
+
+            data_dict["train_signals"] = round_train_signals
+            data_dict["active_round"] = int(round_num)
+            data_dict["round_start_idx"] = int(start)
+            data_dict["round_end_idx"] = int(end)
+            data_dict["round_train_n_original"] = int(original_round_train_n)
+            data_dict["round_train_n_used"] = int(len(round_train_signals))
+            data_dict["sensor_meta"] = meta
+
             print(f"    ✓ round slice [{start}:{end}] ({end - start}/{total} samples)")
 
-        node   = data_dict.get("node", "unknown")
+        node = data_dict.get("node", "unknown")
         motors = data_dict.get("motors", [])
         print(f"    ✓ node={node}  motors={motors}  train_n={len(data_dict['train_signals'])}")
+
         return data_dict
 
     def _build_ae_node_from_data_dict(self, data_dict: dict) -> AEEdgeNode | None:
