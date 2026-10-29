@@ -30,7 +30,11 @@ The current prototype provides:
 - real-time dashboard visualization
 - stale process, model, and cache reset
 - final model evaluation
-- a planned Isaac Sim file-based virtual bearing data pipeline
+- Isaac Sim virtual bearing testbed as the sensor data source
+- round-synchronized sensor metadata publication from Isaac Sim
+- file-buffer based signal handover between Isaac Sim and MN-AE
+- dashboard fault detection fed back into Isaac Sim visualization
+- one-command demo runner
 
 The current implementation runs all AEs on one PC.
 
@@ -93,6 +97,26 @@ TinyIoT
     └── cnt-local-model
 ```
 
+Isaac Sim runs on the Windows side and acts as both the virtual equipment and the sensor gateway. Preprocessing is not performed inside Isaac Sim.
+
+```text
+FEMTO raw CSV
+   │  prepare_data_femto_replay.py   (WSL)
+   ▼
+mn1_stream.npz / mn2_stream.npz / mn3_stream.npz
+   │  copied to C:\Projects\bearing_testbed\data\femto_replay
+   ▼
+Isaac Sim gateway v7            (Windows)
+   ├─ replays the stream and visualizes three bearing units
+   ├─ writes runtime buffers  → mn1.pkl / mn2.pkl / mn3.pkl
+   └─ publishes round metadata → TinyIoT  MN-AE-X/cnt-sensor-data
+   ▼
+MN-AE waits until metadata round == current round   (WSL)
+   └─ reads the buffer slice referenced by data_path
+```
+
+Only metadata is published to TinyIoT. The 2,560-sample signal arrays stay in the file buffer and are referenced by path.
+
 ### Entity Roles
 
 | Entity | Role |
@@ -104,6 +128,8 @@ TinyIoT
 | TinyIoT CSE | Stores oneM2M resources and sends subscription notifications |
 | Dashboard | Reads the current FL state and displays training and anomaly graphs |
 | oneM2M Design Tool | Displays the TinyIoT resource tree |
+| Isaac Sim gateway | Replays FEMTO streams, visualizes the bearing units, writes runtime buffers, and publishes round metadata |
+| FL demo runner | Resets demo state and starts Dashboard, MN-AEs, and IN-AE in order |
 
 ---
 
@@ -155,6 +181,23 @@ A local update contains information such as:
   "val_loss": 0.002,
   "val_auroc": 0.95,
   "num_samples": 1000
+}
+```
+
+Sensor metadata published by the Isaac Sim gateway has the following form:
+
+```json
+{
+  "type": "isaac-sim-sync-buffer",
+  "jobState": "FL_TRAINING",
+  "node": "mn3",
+  "round": 8,
+  "currentRound": 8,
+  "data_path": "C:/Projects/bearing_testbed/data/fl_buffer/mn3.pkl",
+  "stream_path": "C:/Projects/bearing_testbed/data/femto_replay/mn3_stream.npz",
+  "start_idx": 560,
+  "end_idx": 640,
+  "window_count": 80
 }
 ```
 
@@ -247,6 +290,18 @@ All three subscriptions notify:
 http://127.0.0.1:6000/notify
 ```
 
+### 5.3 Isaac Sim Command Subscription
+
+The Isaac Sim gateway also watches the FL control container so that it can publish sensor metadata for the correct round.
+
+```text
+TinyIoT/IN-AE/cnt-fl-control
+└── Isaac Sim gateway
+    → detects the FL_TRAINING round command
+    → writes the runtime buffer for that round
+    → publishes metadata to MN-AE-X/cnt-sensor-data
+```
+
 ---
 
 ## 6. End-to-End FL Sequence
@@ -308,7 +363,35 @@ Process:
 6. Each MN-AE stores the global model in its local cache.
 ```
 
-### 6.3 Local Training and Update Upload
+### 6.3 Sensor Data Handover
+
+```text
+Isaac Sim              TinyIoT CSE                  MN-AE-X
+  |                         |                          |
+  |<--- round command ------|                          |
+  |                         |                          |
+  Write runtime buffer      |                          |
+  mnX.pkl                   |                          |
+  |                         |                          |
+  |-- CREATE sensor CIN --->|                          |
+  |                         |-------- NOTIFY --------->|
+  |                         |                    Check metadata round
+  |                         |                    Load buffer slice
+  |                         |                          |
+```
+
+Process:
+
+```text
+1. Isaac Sim detects the FL_TRAINING round command.
+2. Isaac Sim replays the round window range for each node.
+3. Isaac Sim writes mn1.pkl, mn2.pkl, and mn3.pkl.
+4. Isaac Sim publishes sensor metadata containing the round and the buffer path.
+5. MN-AE compares the metadata round with the current FL round.
+6. MN-AE proceeds only when the rounds match.
+```
+
+### 6.4 Local Training and Update Upload
 
 ```text
 IN-AE                  TinyIoT CSE                  MN-AE-X
@@ -333,7 +416,7 @@ Process:
 5. TinyIoT sends an update notification to IN-AE.
 ```
 
-### 6.4 Aggregation and Next Round
+### 6.5 Aggregation and Next Round
 
 ```text
 IN-AE                  TinyIoT CSE                  MN-AE-X
@@ -417,6 +500,36 @@ Example round command:
 | Batch size | 32 |
 | Anomaly score | reconstruction error |
 | Fault decision | threshold exceeded three consecutive times |
+
+### Replay Stream and Runtime Buffer
+
+The Isaac replay demo does not feed raw FEMTO files directly. Windows are classified into normal, degradation, and fault states by RMS, then recomposed into a per-node time-series stream.
+
+| Item | Value |
+| --- | --- |
+| Stream length | 800 windows per node |
+| Windows per FL round | 80 |
+| Rounds | 10 |
+| MN1 stream | normal 800 |
+| MN2 stream | normal 650 + degradation 150 |
+| MN3 stream | normal 450 + degradation 170 + fault 180 |
+| MN3 fault onset | window 620 |
+| Train windows per round | 50 of 80, sampled with `np.linspace` |
+
+MN3 never uses fault data for training. Its fault transition is detected by the global model that is learned together with the other nodes.
+
+```text
+prepare_data_femto_replay.py
+→ femto_replay/mnX_stream.npz     preprocessing output
+
+Isaac Sim gateway v7
+→ fl_buffer/mnX.pkl               runtime buffer
+
+TinyIoT cnt-sensor-data CIN
+→ metadata only
+  { type, jobState, node, round, currentRound,
+    data_path, stream_path, start_idx, end_idx, window_count }
+```
 
 The Autoencoder is trained using normal vibration data.
 
@@ -526,9 +639,11 @@ The dashboard ignores:
 
 This prevents an old `global_round10.pt` file from being loaded during a new FL run.
 
-### 9.3 Round 7 Anomaly Demonstration
+A stale `FL_COMPLETED` state left in the CSE from a previous run is also rejected when a new run starts.
 
-The default dashboard demonstration policy is:
+### 9.3 Anomaly Demonstration
+
+In the legacy PKL path the demonstration policy is a deterministic input switch.
 
 ```text
 MN1
@@ -554,11 +669,11 @@ It can be changed with:
 export FL_ANOMALY_START_ROUND=6
 ```
 
-This is a deterministic demo-input switch.
-
 It means that MN3 anomaly samples are displayed from Round 7.
 
 It does not mean that the model independently predicts in advance that failure must occur at Round 7.
+
+In the Isaac replay path this switch is not the source of the anomaly. The MN3 stream already contains the degradation and fault segments, and playback advances with the FL round, so the fault onset at window 620 falls inside the Round 8 playback range.
 
 ---
 
@@ -567,6 +682,8 @@ It does not mean that the model independently predicts in advance that failure m
 `clean_fl.sh` prepares a fresh FL demonstration.
 
 It preserves the preprocessed FEMTO PKL files.
+
+`run_femto_isaac_demo.sh` performs its own reset, so `clean_fl.sh` is only required for the manual startup path.
 
 ### Reset Target
 
@@ -658,7 +775,21 @@ FL
 │   ├── onem2m_utils.py
 │   ├── personalize.py
 │   ├── prepare_data_femto.py
+│   ├── prepare_data_femto_replay.py
 │   └── setup_resources_standard.py
+│
+├── isaac_sim
+│   └── isaac_femto_demo_gateway_v7.py
+│
+├── femto_replay
+│   ├── mn1_stream.npz
+│   ├── mn2_stream.npz
+│   └── mn3_stream.npz
+│
+├── fl_buffer
+│   ├── mn1.pkl
+│   ├── mn2.pkl
+│   └── mn3.pkl
 │
 ├── archive
 │   └── experiments
@@ -669,7 +800,8 @@ FL
 ├── main.py
 ├── README.md
 ├── requirements.txt
-└── run_fl.sh
+├── run_fl.sh
+└── run_femto_isaac_demo.sh
 ```
 
 ### Main Files
@@ -684,7 +816,10 @@ FL
 | `fl/aggregator.py` | Performs weighted FedAvg aggregation |
 | `fl/model.py` | Defines the Conv1D Autoencoder |
 | `fl/prepare_data_femto.py` | Converts PRONOSTIA data into node-specific PKL files |
+| `fl/prepare_data_femto_replay.py` | Builds per-node replay streams (`*_stream.npz`) from PRONOSTIA data |
 | `fl/dashboard_server.py` | Polls FL state, calculates scores, and sends dashboard SSE events |
+| `isaac_sim/isaac_femto_demo_gateway_v7.py` | Isaac Sim gateway: stream replay, visualization, buffer writer, metadata publisher |
+| `run_femto_isaac_demo.sh` | Isaac replay demo runner: state reset, Dashboard, MN-AE, and IN-AE startup |
 | `clean_fl.sh` | Resets processes, DB resources, model files, and caches while preserving PKL data |
 | `fl_bearing_dashboard.html` | Dashboard frontend |
 
@@ -692,7 +827,14 @@ FL
 
 ## 12. Environment Setup
 
-The current prototype is designed for Linux or WSL2.
+The demo spans two environments.
+
+| Side | Runs | Notes |
+| --- | --- | --- |
+| WSL2 Ubuntu | TinyIoT CSE, IN-AE, MN-AE ×3, Dashboard | FL code and oneM2M platform |
+| Windows | NVIDIA Isaac Sim gateway | Visualization and sensor metadata publication |
+
+Both sides exchange files through the Windows path `C:\Projects\bearing_testbed`, which is visible from WSL as `/mnt/c/Projects/bearing_testbed`.
 
 ```bash
 cd ~/projects/federated-learning
@@ -714,6 +856,16 @@ TinyIoT must be running at:
 
 ```text
 http://127.0.0.1:3000
+```
+
+Isaac Sim must be able to reach the same endpoint from Windows. If `http://127.0.0.1:3000` is not reachable from the Windows side, enable WSL2 mirrored networking or set `TINYIOT_BASE_URL` in the gateway script to the WSL IP.
+
+The gateway script and the data directories must exist on the Windows side:
+
+```text
+C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v7.py
+C:\Projects\bearing_testbed\data\femto_replay
+C:\Projects\bearing_testbed\data\fl_buffer
 ```
 
 ---
@@ -749,9 +901,76 @@ node_id 2
 
 ## 14. How to Run
 
-The recommended procedure uses separate terminals.
+### 14.0 Isaac Replay Demo (recommended)
 
-This makes it easier to inspect each AE log independently.
+This is the current demo path. The runner performs its own reset and does not call `fl/data_generator.py`, because sensor metadata is published by Isaac Sim.
+
+Prepare the replay streams once:
+
+```bash
+cd ~/projects/federated-learning
+source .venv/bin/activate
+
+python3 fl/prepare_data_femto_replay.py
+
+cp /tmp/fl_data/femto_replay/*_stream.npz \
+   /mnt/c/Projects/bearing_testbed/data/femto_replay/
+```
+
+With TinyIoT already running, start the demo:
+
+```bash
+cd ~/projects/federated-learning
+source .venv/bin/activate
+
+./run_femto_isaac_demo.sh
+```
+
+Options:
+
+```text
+--skip-clean         skip the demo reset
+--no-prompt          start IN-AE without waiting for Enter
+--exit-on-complete   exit after FL_COMPLETED
+--full-train         use all 80 windows per round
+```
+
+When the runner prints the Isaac Sim step, open Isaac Sim on Windows and run this line in `Window > Script Editor`:
+
+```python
+exec(open(r"C:\Projects\bearing_testbed\scripts\isaac_femto_demo_gateway_v7.py", encoding="utf-8").read())
+```
+
+Wait for the gateway to report that it is waiting:
+
+```text
+[start] FEMTO Isaac synced demo started - v7
+        Waiting for IN-AE FL_TRAINING round command...
+```
+
+Then press Enter in the runner terminal. IN-AE starts and the rounds begin.
+
+```text
+TinyIoT
+   ↓
+./run_femto_isaac_demo.sh          Dashboard, MN-AE ×3
+   ↓
+Isaac Sim gateway v7               Windows Script Editor
+   ↓
+Enter in the runner terminal
+   ↓
+IN-AE  →  Round 1 … Round 10
+```
+
+Logs for each run are written to:
+
+```text
+logs/femto_isaac_demo/<RUN_ID>
+```
+
+The sections below describe the manual startup path without Isaac Sim.
+
+---
 
 ### 14.1 Start TinyIoT
 
@@ -966,28 +1185,32 @@ For a completely fresh demonstration, `clean_fl.sh` is recommended.
 
 9. MN-AEs retrieve the global model.
 
-10. MN-AEs perform local training.
+10. Isaac Sim writes the round buffer and publishes sensor metadata.
 
-11. MN-AEs upload local update CINs.
+11. MN-AEs confirm the metadata round and perform local training.
 
-12. TinyIoT sends update NOTIFY messages to IN-AE.
+12. MN-AEs upload local update CINs.
 
-13. IN-AE collects three local updates.
+13. TinyIoT sends update NOTIFY messages to IN-AE.
 
-14. IN-AE publishes FL_AGGREGATING.
+14. IN-AE collects three local updates.
 
-15. IN-AE filters anomalous updates.
+15. IN-AE publishes FL_AGGREGATING.
 
-16. IN-AE performs weighted FedAvg.
+16. IN-AE filters anomalous updates.
 
-17. IN-AE publishes the next global model.
+17. IN-AE performs weighted FedAvg.
 
-18. The process repeats until Round 10.
+18. IN-AE publishes the next global model.
 
-19. IN-AE publishes FL_COMPLETED.
+19. The process repeats until Round 10.
 
-20. The dashboard displays the final result.
+20. IN-AE publishes FL_COMPLETED.
+
+21. The dashboard displays the final result.
 ```
+
+Steps 10 and 11 apply to the Isaac replay path. In the manual path the sensor metadata is registered once by `data_generator.py`.
 
 Example MN-AE log:
 
@@ -1026,10 +1249,25 @@ Global model published Round 1
 ### Preprocessed Data
 
 ```text
-/tmp/fl_data/femto
+/tmp/fl_data/femto                 legacy PKL path
 ├── mn1.pkl
 ├── mn2.pkl
 └── mn3.pkl
+
+/tmp/fl_data/femto_replay          replay stream output
+├── mn1_stream.npz
+├── mn2_stream.npz
+└── mn3_stream.npz
+```
+
+### Isaac Sim Shared Paths
+
+```text
+C:\Projects\bearing_testbed\data\femto_replay     stream input
+C:\Projects\bearing_testbed\data\fl_buffer        runtime buffer
+C:\Projects\bearing_testbed\scripts               gateway script
+
+/mnt/c/Projects/bearing_testbed/data/fl_buffer    same buffer, seen from WSL
 ```
 
 ### Global Models
@@ -1065,6 +1303,12 @@ Global model published Round 1
 
 ```text
 /tmp/fl_models/.demo_run_started
+```
+
+### Demo Logs
+
+```text
+logs/femto_isaac_demo/<RUN_ID>
 ```
 
 ---
@@ -1103,6 +1347,18 @@ TINYIOT_DB_PORT
 TINYIOT_DB_ADMIN_USER
 ```
 
+Isaac replay demo variables:
+
+```text
+FEMTO_REPLAY_DIR            replay stream directory
+FL_PKL_DIR                  runtime buffer directory
+FL_SENSOR_ROUND_WAIT_SEC    MN-AE wait limit for matching sensor metadata
+FL_SENSOR_ROUND_POLL_SEC    MN-AE poll interval while waiting
+FL_DEMO_ROUND_TRAIN_N       training windows sampled per round
+ISAAC_SCRIPT_WIN            gateway script path shown in the runner instruction
+LOG_DIR                     demo log directory
+```
+
 Example:
 
 ```bash
@@ -1113,6 +1369,10 @@ export FL_DASHBOARD_PORT=7000
 export TINYIOT_DB_NAME=tinydb
 
 export TINYIOT_DB_PORT=5433
+
+export FEMTO_REPLAY_DIR=/mnt/c/Projects/bearing_testbed/data/femto_replay
+
+export FL_PKL_DIR=/mnt/c/Projects/bearing_testbed/data/fl_buffer
 ```
 
 ---
@@ -1236,140 +1496,132 @@ Generate them:
 python3 fl/prepare_data_femto.py
 ```
 
----
+### 19.8 FL Stops at Round 1 in the Isaac Demo
 
-## 20. Isaac Sim Integration Roadmap
-
-Isaac Sim integration is planned as an additional data source.
-
-It does not replace the current oneM2M FL workflow.
-
-### 20.1 Phase 1: File-Based Data Dumper
+Cause:
 
 ```text
-Isaac Sim
-   ↓
-Simplified virtual bearing testbed
-   ↓
-Shaft RPM and housing load
-   ↓
-IMU or physics-state collection
-   ↓
-Python-generated impact and noise
-   ↓
-CSV or NumPy output
-   ↓
-Node-specific PKL conversion
-   ↓
-cnt-sensor-data path registration
-   ↓
-Existing MN-AE local training
-   ↓
-Existing oneM2M notification workflow
-   ↓
-IN-AE FedAvg aggregation
+The virtual environment was not activated
+
+or
+
+Isaac Sim was started after IN-AE
+
+or
+
+Isaac Sim cannot reach TinyIoT from Windows
 ```
 
-### Initial Virtual Testbed
+Activate the virtual environment before running the demo:
+
+```bash
+source .venv/bin/activate
+```
+
+Start Isaac Sim first and wait for the gateway to report that it is waiting for the round command, then press Enter in the runner terminal.
+
+Check reachability from Windows:
 
 ```text
-Isaac Sim World
-└── PRONOSTIA_Testbed
-    ├── Base
-    ├── Housing
-    │   ├── Accel_Sensor_X
-    │   └── Accel_Sensor_Y
-    │
-    └── Shaft
-        └── EccentricMass
+http://127.0.0.1:3000
 ```
 
-Initial implementation scope:
+If this fails, enable WSL2 mirrored networking or set the WSL IP in the gateway script.
 
-- Cube-based housing
-- Cylinder-based shaft
-- simplified bearing geometry
-- approximately 1,800 rpm shaft operation
-- approximately 4,000 N housing load
-- X-axis and Y-axis acceleration positions
-- node-specific RPM and load conditions
-- normal, degradation, and fault stages
-
-### Proposed Node Conditions
-
-| Node | Example Condition | Purpose |
-| --- | --- | --- |
-| MN1 | stable RPM and stable load | normal reference |
-| MN2 | different RPM and load | non-IID normal condition |
-| MN3 | normal-to-fault transition | anomaly demonstration |
-
-### Hybrid Signal Generation
-
-A simplified Isaac Sim model cannot reproduce every physical characteristic of a real damaged bearing.
-
-The initial signal generation method is:
+### 19.9 MN-AE Waits for Sensor Metadata
 
 ```text
-Final vibration signal
-=
-Isaac Sim IMU or motion component
-+
-RPM-related periodic component
-+
-Synthetic fault impulse
-+
-Measurement noise
+Waiting for sensor metadata of round N
 ```
 
-The final input window remains:
+Cause:
 
 ```text
-Sampling rate interpretation: 25,600 Hz
+The Isaac Sim gateway is not running
 
-Window duration: 0.1 seconds
+or
 
-Sequence length: 2,560 samples
+The gateway published metadata for a different round
 ```
 
-### Proposed Output Files
-
-Raw Isaac Sim output:
-
-```text
-/tmp/fl_data/isaac/raw
-├── mn1_raw.npz
-├── mn2_raw.npz
-└── mn3_raw.npz
-```
-
-Processed FL input:
-
-```text
-/tmp/fl_data/isaac
-├── mn1.pkl
-├── mn2.pkl
-└── mn3.pkl
-```
-
-The processed PKL files should use the current data contract.
+Restart the gateway:
 
 ```python
-{
-    "train_signals": ...,
-    "val_signals": ...,
-    "val_labels": ...,
-    "test_stream_signals": ...,
-    "test_stream_labels": ...,
-    "norm_mean": ...,
-    "norm_std": ...,
-    "seq_len": 2560,
-    "n_channels": 1,
-    "node": "mn1",
-    "source": "isaac-sim"
-}
+stop_femto_demo()
 ```
 
-### 20.2 Phase 2: ROS 2 Bridge and IPE
+Then run the `exec(...)` line again.
+
+---
+
+## 20. Isaac Sim Integration
+
+Isaac Sim is integrated as the sensor data source for the demo. It does not replace the oneM2M FL workflow; it supplies the data that the workflow carries.
+
+### 20.1 Role
+
+```text
+1. reads the FEMTO-based replay stream
+2. visualizes the MN1 / MN2 / MN3 bearing units
+3. writes the FL runtime buffer (pkl)
+4. watches cnt-fl-control for the FL round command
+5. publishes round metadata to MN-AE-X/cnt-sensor-data
+6. reflects the dashboard fault decision in the visualization
+```
+
+Preprocessing and postprocessing are performed on the WSL side. Isaac Sim replays prepared signals and acts as the gateway between the virtual equipment and the CSE.
+
+### 20.2 Node Conditions
+
+| Node | Stream Composition | Purpose |
+| --- | --- | --- |
+| MN1 | normal only | normal reference |
+| MN2 | normal and degradation | non-IID normal condition |
+| MN3 | normal, degradation, and fault | anomaly demonstration |
+
+### 20.3 Round Synchronization
+
+Isaac Sim must be started before IN-AE. IN-AE publishes the round command, Isaac Sim detects it and publishes the matching sensor metadata, and MN-AE waits until the metadata round equals the current round before training.
+
+```text
+R1  : windows   0– 79
+R2  : windows  80–159
+...
+R8  : windows 560–639      MN3 fault onset at 620
+R9  : windows 640–719
+R10 : windows 720–799
+```
+
+### 20.4 Fault Indicator
+
+The bearing indicator stays green regardless of the internal state code. It turns red only after the dashboard reports three consecutive score exceedances for that node, so the on-screen fault is the federated learning result rather than simulator foreknowledge.
+
+### 20.5 Idle Behavior
+
+Between rounds the gateway loops the last 24 windows at 6 windows per second so the equipment keeps moving. After the Round 10 visualization completes, the controller stops automatically.
+
+### 20.6 Stop and Restart
+
+```python
+stop_femto_demo()
+```
+
+Re-running the `exec(...)` line restarts the gateway and clears the previous subscription.
+
+### 20.7 Current Limitations
+
+The current Isaac Sim integration does not provide:
+
+- true 25.6 kHz PhysX simulation
+- physics-generated vibration signals
+- exact crack propagation
+- exact BPFO or BPFI physical reproduction
+- bearing temperature physics
+- remaining useful life prediction
+
+The signals are replayed from the PRONOSTIA dataset. Isaac Sim provides the equipment view, the round-synchronized data handover, and the fault visualization.
+
+### 20.8 Next Phase: ROS 2 Bridge and IPE
 
 ```text
 Isaac Sim
@@ -1383,40 +1635,14 @@ oneM2M contentInstance
 MN-AE
 ```
 
-The second phase requires:
+The next phase requires:
 
 - ROS 2 topic definitions
 - vibration window buffering
 - ROS 2 message conversion
 - oneM2M IPE implementation
-- FL round and data-buffer synchronization
+- physics-based signal generation instead of file replay
 - network-accessible model storage for multi-PC execution
-
-### Isaac Sim Limitations
-
-The first Isaac Sim demo does not aim to provide:
-
-- true 25.6 kHz PhysX simulation
-- exact PRONOSTIA signal reproduction
-- exact crack propagation
-- exact BPFO or BPFI physical reproduction
-- complete bearing temperature physics
-- complete run-to-failure reproduction
-- accurate remaining useful life prediction
-
-The first completion criterion is:
-
-```text
-Isaac Sim generates node-specific vibration files
-
-→ the files are converted into the current PKL format
-
-→ data paths are registered in cnt-sensor-data
-
-→ the existing oneM2M-FL pipeline completes ten rounds
-
-→ the dashboard displays the generated signals
-```
 
 ---
 
@@ -1448,18 +1674,23 @@ Isaac Sim generates node-specific vibration files
 - MN cache reset
 - old FL process termination
 - final evaluation
+- Isaac Sim replay-based virtual bearing testbed
+- Isaac Sim runtime buffer generation
+- round-synchronized sensor metadata publication
+- MN-AE round-identifier matching before training
+- stale FL_COMPLETED rejection on a new run
+- dashboard-driven fault indicator in Isaac Sim
+- one-command Isaac replay demo runner
 
 ### Planned
 
-- Isaac Sim basic-geometry bearing testbed
-- virtual bearing Data Dumper
-- Isaac Sim NPZ-to-PKL converter
-- Isaac Sim source metadata registration
 - ROS 2 Bridge
 - ROS 2 IPE
+- physics-based vibration signal generation in Isaac Sim
 - multi-CSE deployment
 - multi-PC deployment
 - HTTP, S3, or MinIO model artifact transfer
+- native `<flJob>` resource type in TinyIoT
 
 ---
 
@@ -1475,4 +1706,7 @@ Isaac Sim generates node-specific vibration files
 - Dashboard polling is used only for visualization.
 - Only one Dashboard process can use port 7000.
 - Starting a new demo without clearing old processes, models, caches, and CSE resources may expose stale Round 10 data.
-- The Round 7 anomaly switch controls which MN3 test samples are displayed.
+- The Round 7 anomaly switch controls which MN3 test samples are displayed in the legacy PKL path.
+- In the Isaac replay path the anomaly comes from the MN3 stream itself, and playback advances with the FL round.
+- Isaac Sim must be started before IN-AE so that the first round command is not missed.
+- Sensor signals are handed over through the file buffer; only metadata is published to the CSE.
