@@ -141,7 +141,7 @@
 
   .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
   .chart-name { font-size: 13px; font-weight: 600; color: var(--text); }
-  .chart-cold { font-size: 10px; font-weight: 500; color: var(--tr-bar); margin-left: 4px; }
+  .chart-unseen { font-size: 10px; font-weight: 500; color: var(--tr-bar); margin-left: 4px; }
   .chart-tag  { font-size: 10px; color: var(--text3); }
   .live-val   { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 8px; transition: color 0.3s; }
   .live-val.danger { color: #a32d2d; }
@@ -407,7 +407,7 @@
 
       <div class="chart-card hl" id="cc-mn3">
         <div class="chart-head">
-          <span class="chart-name">mn3 <span class="chart-cold">cold-start</span></span>
+          <span class="chart-name">mn3 <span class="chart-unseen" title="학습에는 참여하지만 고장 데이터는 한 번도 학습하지 않은 노드. 고장 판정은 다른 노드와 함께 학습한 글로벌 모델이 수행한다.">unseen fault</span></span>
           <span class="chart-tag" id="thr-mn3">threshold —</span>
         </div>
         <div class="live-val" id="lv-mn3">—</div>
