@@ -196,6 +196,78 @@ DP_MAX_GRAD_NORM = 1.5
 
 
 # ════════════════════════════════════════════════════════
+# cold start 노드 설정
+# ════════════════════════════════════════════════════════
+
+# 여기에 적힌 노드는 '학습에 참여하지 않는 신규 설비'로 취급한다.
+# 라운드 명령과 글로벌 모델은 똑같이 받지만 train_local을 돌리지 않고,
+# 받은 글로벌 모델로 추론만 해서 가중치 없는 결과를 올린다.
+# 따라서 FedAvg에는 들어가지 않는다.
+#   예) FL_COLD_START_NODES=mn3
+# 비워 두면(기본) 모든 노드가 학습에 참여하는 기존 동작 그대로다.
+COLD_START_NODES = [
+    n.strip()
+    for n in os.getenv("FL_COLD_START_NODES", "").split(",")
+    if n.strip()
+]
+
+ALL_NODES = [f"mn{i}" for i in range(1, NUM_CLIENTS + 1)]
+
+TRAINING_NODES = [
+    n for n in ALL_NODES if n not in COLD_START_NODES
+]
+
+
+# ════════════════════════════════════════════════════════
+# oneM2M 가중치 전송 설정
+# ════════════════════════════════════════════════════════
+
+# True면 모델 가중치를 contentInstance의 con 안에 base64로 실어 보낸다.
+# False면 기존처럼 로컬 파일 경로만 전달한다(같은 PC에서만 동작).
+FL_EMBED_WEIGHTS = os.getenv(
+    "FL_EMBED_WEIGHTS",
+    "1",
+) not in ("0", "false", "False")
+
+# 가중치를 fp16으로 줄여 보낼지 여부. 전송량이 절반이 된다.
+# 정확도가 민감하면 0으로 끄면 된다.
+FL_WEIGHTS_FP16 = os.getenv(
+    "FL_WEIGHTS_FP16",
+    "1",
+) not in ("0", "false", "False")
+
+# contentInstance 하나에 담을 base64 가중치의 상한(바이트).
+# 이 값을 넘으면 embed를 포기하고 경로 전달로 되돌아간다.
+#
+# TinyIoT 실측 기준(httpd.c의 BUF_SIZE / config.h의 MAX_PAYLOAD_SIZE = 65536):
+#   60KB CIN -> 생성 성공
+#   64KB CIN -> 400 "Invalid JSON format" (버퍼에서 잘려 JSON이 깨짐)
+# 그래서 기본값을 48KB로 둔다. 다른 필드와 JSON 오버헤드까지 감안한 여유분이다.
+# 이 값을 CSE 한계보다 크게 잡으면 CIN 생성이 실패하고 라운드 전체가 멈춘다.
+FL_MAX_CIN_BYTES = int(
+    os.getenv(
+        "FL_MAX_CIN_BYTES",
+        str(48 * 1024),
+    )
+)
+
+# 가중치가 위 상한을 넘을 때 조각내어 보낼지 여부.
+#
+# 주의: 현재 기본값은 꺼짐(0)이다.
+# 조각을 한 컨테이너에 쌓고 이름으로 되읽는 현재 구현은 TinyIoT에서 동작하지 않는다.
+# TinyIoT는 컨테이너의 '최신' contentInstance만 조회할 수 있고, 그보다 오래된 것을
+# 이름이나 ol로 조회하면 stack smashing으로 프로세스가 종료된다(2KB CIN 2개로도 재현).
+# 조각마다 전용 컨테이너를 두고 각각의 la를 읽는 구조로 바꾸면 해결되며,
+# 그 방식은 CSE 수준에서 검증했다(39조각 업로드 0.8s / 회수 0.1s, 라운드 재사용 가능).
+# 재구현 전까지는 꺼둔다. 켜면 상한 초과 시 조각 전송을 시도하고,
+# 꺼져 있으면 기존 model_path 방식으로 폴백한다.
+FL_CHUNK_WEIGHTS = os.getenv(
+    "FL_CHUNK_WEIGHTS",
+    "0",
+) not in ("0", "false", "False")
+
+
+# ════════════════════════════════════════════════════════
 # 설정 인스턴스
 # ════════════════════════════════════════════════════════
 

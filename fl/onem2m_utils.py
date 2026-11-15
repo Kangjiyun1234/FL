@@ -187,14 +187,24 @@ def create_content_instance(
     container_path: str,
     content: Any,
     labels: Optional[List[str]] = None,
+    resource_name: Optional[str] = None,
 ) -> Optional[Dict]:
+    """
+    resource_name을 주면 CIN의 rn을 직접 지정한다.
+    가중치 조각처럼 수신측이 discovery 없이 이름으로 바로 RETRIEVE 해야 하는
+    경우에 쓴다.
+    """
     url = f"{config.BASE_URL}/{container_path}"
     con_str = (json.dumps(content, separators=(",", ":"), ensure_ascii=False)
                if isinstance(content, (dict, list)) else str(content))
 
-    payload: Dict[str, Any] = {"m2m:cin": {"con": con_str}}
+    cin_obj: Dict[str, Any] = {"con": con_str}
+    if resource_name:
+        cin_obj["rn"] = resource_name
     if labels:
-        payload["m2m:cin"]["lbl"] = labels
+        cin_obj["lbl"] = labels
+
+    payload: Dict[str, Any] = {"m2m:cin": cin_obj}
 
     try:
         r = _request_with_retry("post", url, json=payload, headers=_headers(4), timeout=45)

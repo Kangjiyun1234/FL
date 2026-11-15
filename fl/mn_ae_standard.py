@@ -23,6 +23,7 @@ import torch
 from flask import Flask, request, make_response
 
 import config
+import model_codec
 import onem2m_utils as om2m
 from edge_node import AEEdgeNode
 
@@ -31,6 +32,13 @@ class MNAETrainer:
     def __init__(self, node_id: int, notification_port: int, inject_anomaly: bool = False):
         self.node_id          = node_id
         self.node_name        = f"mn{node_id + 1}"
+
+        # 이 노드가 '학습에 참여하지 않는 신규 설비'인지.
+        # config.COLD_START_NODES 에 이름이 있으면 train_local을 돌리지 않고
+        # 글로벌 모델로 추론만 한다.
+        self.is_cold_start = self.node_name in getattr(
+            config, "COLD_START_NODES", []
+        )
         self.notification_port = notification_port
         self.inject_anomaly   = inject_anomaly
 
@@ -686,11 +694,16 @@ class MNAETrainer:
             print(f"    ⚠ failed to load model {model_path}: {exc}")
             return False
 
-    def _get_global_model_path_for_expected_round(
+    def _get_global_model_meta_for_expected_round(
         self,
         expected_round: int,
         global_model_uri: str | None = None
     ):
+        """
+        글로벌 모델 contentInstance의 con 전체를 돌려준다.
+        예전에는 con 안의 model_path만 꺼내 돌려줬지만, 이제는 con에 가중치
+        자체(weights_b64)가 실려 오므로 호출측이 둘 중 하나를 고를 수 있어야 한다.
+        """
         cin = None
 
         if global_model_uri:
@@ -734,19 +747,19 @@ class MNAETrainer:
             )
             return None
 
-        return model_data.get("model_path")
+        return model_data
 
     def _pull_and_cache_global_model(
         self,
         expected_round: int,
         global_model_uri: str | None = None
     ):
-        src_path = self._get_global_model_path_for_expected_round(
+        meta = self._get_global_model_meta_for_expected_round(
             expected_round,
             global_model_uri=global_model_uri
         )
 
-        if not src_path or not os.path.exists(src_path):
+        if not meta:
             return None
 
         dst_path = os.path.join(
@@ -754,11 +767,42 @@ class MNAETrainer:
             f"global_round{expected_round}.pt"
         )
 
+        # con에 가중치가 실려 왔으면 복원해서 캐시에 저장한다.
+        # 이 경로만으로 동작하면 MN이 다른 머신에 있어도 FL이 성립한다.
+        state_dict = None
         try:
-            shutil.copyfile(src_path, dst_path)
+            state_dict = model_codec.decode_state_dict(
+                meta,
+                fetch_chunk=self._make_chunk_fetcher(meta),
+            )
         except Exception as e:
-            print(f"    ⚠ copy failed: {e}")
-            return None
+            print(
+                f"    ⚠ con 가중치 복원 실패 "
+                f"({type(e).__name__}: {e})"
+            )
+
+        if state_dict is not None:
+            try:
+                torch.save(state_dict, dst_path)
+                print("    ↓ global weights from con(base64)")
+            except Exception as e:
+                print(f"    ⚠ 캐시 저장 실패: {e}")
+                return None
+        else:
+            # 호환 모드: 같은 PC에 있을 때만 통하는 예전 방식
+            src_path = meta.get("model_path")
+            if not src_path or not os.path.exists(src_path):
+                print(
+                    "    ✗ con에 가중치가 없고 model_path도 접근 불가 "
+                    "(MN이 IN과 다른 머신이면 FL_EMBED_WEIGHTS=1 필요)"
+                )
+                return None
+            try:
+                shutil.copyfile(src_path, dst_path)
+                print("    ↓ global weights via model_path (호환 모드)")
+            except Exception as e:
+                print(f"    ⚠ copy failed: {e}")
+                return None
 
         self._write_cache_meta(
             cached_round=expected_round,
@@ -772,8 +816,126 @@ class MNAETrainer:
         return dst_path
 
     # ---------------------------
+    # 가중치 조각 (CSE 페이로드 상한 대응)
+    # ---------------------------
+    def _ensure_weights_container(self, parent_path: str) -> str:
+        """
+        조각을 쌓을 자식 컨테이너를 보장한다.
+        부모가 아니라 자식에 쌓는 이유: 부모 컨테이너에는 구독이 걸려 있어서
+        조각 수십 개가 전부 알림을 발생시키면 수신측이 폭주한다.
+        자식에 쌓으면 CREATE_OF_DIRECT_CHILD 조건에 걸리지 않는다.
+        """
+        om2m.create_container(
+            parent_path,
+            "cnt-weights",
+            mni=1000,
+            mbs=60_000_000,
+        )
+        return f"{parent_path}/cnt-weights"
+
+    def _upload_weight_chunks(self, round_num: int, enc: dict):
+        """
+        가중치 base64를 CIN 상한에 맞게 조각내어 올리고, 매니페스트를 돌려준다.
+        조각 하나라도 실패하면 None을 돌려 호출측이 폴백하도록 한다.
+        """
+        chunks, manifest = model_codec.split_for_cin(
+            enc,
+            getattr(config, "FL_MAX_CIN_BYTES", 48 * 1024),
+        )
+
+        cnt_path = self._ensure_weights_container(self.dropbox_cnt_path)
+
+        for i, part in enumerate(chunks):
+            res = om2m.create_content_instance(
+                cnt_path,
+                {"i": i, "d": part},
+                resource_name=model_codec.chunk_resource_name(round_num, i),
+            )
+            if not res:
+                print(
+                    f"    ✗ 가중치 조각 {i + 1}/{len(chunks)} 업로드 실패"
+                )
+                return None
+
+        manifest["weights_chunk_container"] = cnt_path
+        manifest["weights_chunk_round"] = round_num
+        return manifest
+
+    def _make_chunk_fetcher(self, meta: dict):
+        """
+        매니페스트를 보고 조각을 이름으로 직접 RETRIEVE 하는 함수를 만든다.
+        discovery를 쓰지 않으므로 조각 순서가 보장된다.
+        """
+        cnt_path = meta.get("weights_chunk_container")
+        if not cnt_path:
+            return None
+
+        chunk_round = meta.get(
+            "weights_chunk_round",
+            meta.get("global_round", meta.get("round")),
+        )
+
+        def fetch(index: int):
+            res = om2m.get_resource(
+                f"{cnt_path}/"
+                f"{model_codec.chunk_resource_name(chunk_round, index)}"
+            )
+            if not res:
+                return None
+            con = (res.get("m2m:cin") or {}).get("con")
+            try:
+                obj = json.loads(con) if isinstance(con, str) else con
+            except (TypeError, ValueError):
+                return None
+            return (obj or {}).get("d")
+
+        return fetch
+
+    # ---------------------------
     # Drop-box upload
     # ---------------------------
+    def _upload_inference_result(
+        self,
+        round_num,
+        val_loss,
+        val_auroc,
+    ):
+        """
+        cold start 노드 전용 업로드.
+
+        학습을 하지 않았으므로 가중치도, model_path도 싣지 않는다.
+        type을 fl-inference로 두어 IN-AE가 FedAvg 대상에서 제외하고
+        대시보드 표시용으로만 받도록 한다.
+        """
+        payload = {
+            "type": "fl-inference",
+            "node": self.node_name,
+            "round": round_num,
+            "cold_start": True,
+
+            # 학습 미참여를 드러내는 값들
+            "train_loss": 0.0,
+            "num_samples": 0,
+
+            "accuracy": val_auroc,
+            "val_loss": val_loss,
+            "val_auroc": val_auroc,
+            "timestamp": time.time(),
+        }
+
+        result = om2m.create_content_instance(
+            self.dropbox_cnt_path,
+            payload
+        )
+
+        if result:
+            print(
+                f"  ✓ inference result -> {self.dropbox_cnt_path} "
+                f"(round {round_num}, 가중치 없음)"
+            )
+
+        return result
+
     def _upload_to_dropbox(
         self,
         round_num,
@@ -788,8 +950,8 @@ class MNAETrainer:
             "node": self.node_name,
             "round": round_num,
 
-            # 실제 PyTorch 가중치는 .pt 파일에 저장됨
-            # con에는 해당 파일 경로를 전달
+            # 호환용 필드. 같은 PC에서 돌던 기존 방식을 위해 남겨두지만,
+            # 집계측은 아래에서 동봉하는 weights_b64를 우선 사용한다.
             "model_path": model_path,
             "weights_uri": model_path,
 
@@ -800,6 +962,47 @@ class MNAETrainer:
             "num_samples": num_samples,
             "timestamp": time.time(),
         }
+
+        # 실제 가중치를 con 안에 실어 보낸다.
+        # 이것이 있어야 MN을 다른 머신에 올려도 FL이 성립한다.
+        if getattr(config, "FL_EMBED_WEIGHTS", False):
+            try:
+                enc = model_codec.encode_state_dict(
+                    torch.load(model_path, map_location="cpu"),
+                    fp16=getattr(config, "FL_WEIGHTS_FP16", True),
+                )
+                limit = getattr(config, "FL_MAX_CIN_BYTES", 48 * 1024)
+
+                if enc["weights_bytes"] <= limit:
+                    payload.update(enc)
+                    print(
+                        f"    ↑ weights in con: {model_codec.describe(enc)}"
+                    )
+                elif getattr(config, "FL_CHUNK_WEIGHTS", True):
+                    manifest = self._upload_weight_chunks(round_num, enc)
+                    if manifest:
+                        payload.update(manifest)
+                        print(
+                            f"    ↑ weights in con: "
+                            f"{model_codec.describe(manifest)} "
+                            f"-> {manifest['weights_chunk_container']}"
+                        )
+                    else:
+                        print(
+                            "    ⚠ 조각 업로드 실패 "
+                            "-> model_path 방식으로 대체"
+                        )
+                else:
+                    print(
+                        f"    ⚠ weights {enc['weights_bytes'] / 1024:.0f}KB "
+                        f"> limit {limit / 1024:.0f}KB, 조각 전송 꺼짐 "
+                        f"-> model_path 방식으로 대체"
+                    )
+            except Exception as exc:
+                print(
+                    f"    ⚠ weight embedding 실패 ({type(exc).__name__}: {exc}) "
+                    f"-> model_path 방식으로 대체"
+                )
 
         result = om2m.create_content_instance(
             self.dropbox_cnt_path,
@@ -825,6 +1028,11 @@ class MNAETrainer:
         print(f"  fl-control:   {self.fl_control_path}")
         print(f"  global-model: {self.global_model_path}")
         print(f"  drop-box:     {self.dropbox_cnt_path}")
+        if self.is_cold_start:
+            print(
+                "  ❄ COLD START MODE: 학습에 참여하지 않음 "
+                "(글로벌 모델 수신 → 추론만 → 가중치 미전송)"
+            )
         if self.inject_anomaly:
             print("  ⚠ ANOMALY MODE: 센서 데이터에 노이즈 주입 예정")
 
@@ -944,6 +1152,38 @@ class MNAETrainer:
                     getattr(config, "DP_DELTA", 1e-5)
                 )
             )
+
+            if self.is_cold_start:
+                # 학습하지 않는다. 받은 글로벌 모델 그대로 자기 데이터를
+                # 평가해서 임계값/AUROC만 구하고, 가중치 없이 올린다.
+                print(
+                    f"  [{self.node_name}] Round {round_num} "
+                    f"COLD START — 학습 없음, 글로벌 모델로 추론만"
+                )
+
+                val_loss, val_auroc = self.edge_node._evaluate_val()
+
+                print(
+                    f"  ✓ inference only"
+                    f"  val_loss={val_loss:.6f}"
+                    f"  val_auroc={val_auroc:.4f}"
+                )
+
+                if self.upload_stagger_sec > 0:
+                    time.sleep(self.upload_stagger_sec)
+
+                if not self._upload_inference_result(
+                    round_num=round_num,
+                    val_loss=val_loss,
+                    val_auroc=val_auroc,
+                ):
+                    print(
+                        f"  ✗ inference result upload failed "
+                        f"in round {round_num}; stop MN-AE"
+                    )
+                    return
+
+                continue
 
             if security_mode == "DP":
                 print(

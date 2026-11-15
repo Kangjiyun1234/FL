@@ -5,7 +5,9 @@
 - IN-AE/cnt-local-updates : Drop-box root
 - Loss Z-score 기반 이상치 탐지 (Poisoning Attack 방어)
 - ACP 접근 제어 검증 로그
-- [추가] FL 완료 후 cold-start hidden test 자동 평가 호출
+- [추가] FL 완료 후 hidden test 자동 평가 호출
+  (학습에 사용하지 않은 test_stream 구간으로 평가. cold start가 아니다 —
+   평가 대상 노드도 학습에 참여했고, 보지 못한 것은 '노드'가 아니라 '고장 구간'이다)
 """
 
 import sys
@@ -21,6 +23,7 @@ import torch
 from flask import Flask, request, make_response
 
 import config
+import model_codec
 import onem2m_utils as om2m
 from aggregator import Aggregator
 from model import Conv1DAE
@@ -36,8 +39,28 @@ class INAECoordinator:
         self.global_model_path = f"{config.CSE_NAME}/{config.IN_AE_NAME}/cnt-global-model"
         self.dropbox_root      = f"{config.CSE_NAME}/{config.IN_AE_NAME}/cnt-local-updates"
 
-        self.expected_nodes = config.NUM_CLIENTS
-        self.node_names = [f"mn{i}" for i in range(1, self.expected_nodes + 1)]
+        # 리소스/구독은 모든 노드에 대해 만든다.
+        # cold start 노드도 라운드 명령과 글로벌 모델은 받아야 추론을 할 수 있다.
+        self.node_names = list(
+            getattr(config, "ALL_NODES", None)
+            or [f"mn{i}" for i in range(1, config.NUM_CLIENTS + 1)]
+        )
+
+        # 집계 대기 대상은 '학습에 참여하는 노드'만이다.
+        self.cold_start_nodes = list(getattr(config, "COLD_START_NODES", []))
+        self.training_nodes = [
+            n for n in self.node_names if n not in self.cold_start_nodes
+        ]
+        self.expected_nodes = len(self.training_nodes)
+
+        # cold start 노드의 추론 결과는 따로 모은다(대시보드/로그용).
+        self.cold_start_results = {}
+
+        if self.cold_start_nodes:
+            print(
+                f"  [cold start] 학습 참여: {self.training_nodes} / "
+                f"학습 미참여(추론만): {self.cold_start_nodes}"
+            )
         self.dropbox_by_node = {
             node: f"{self.dropbox_root}/cnt-{node}" for node in self.node_names
         }
@@ -74,7 +97,7 @@ class INAECoordinator:
 
         self.latest_global_model_path = None
 
-        # cold-start hidden test 평가용
+        # hidden test 평가용 (학습에 쓰지 않은 test_stream 구간)
         self.hidden_test_path = os.getenv(
             "FL_HIDDEN_TEST_PATH",
             "/tmp/fl_data/femto/mn1.pkl"
@@ -125,11 +148,13 @@ class INAECoordinator:
             raw_node = str(
                 result_data.get("node", "")
             ).strip().lower()
+            # 별칭은 cold start 노드를 포함한 '모든 노드'에 대해 만들어야 한다.
+            # (그 노드도 알림을 보내므로 이름을 해석할 수 있어야 한다)
             aliases = {
                 f"mn-ae-{i}": f"mn{i}"
                 for i in range(
                     1,
-                    self.expected_nodes + 1
+                    len(self.node_names) + 1
                 )
             }
             node_from_con = aliases.get(
@@ -265,25 +290,36 @@ class INAECoordinator:
                     return resp
 
                 with self.collection_lock:
-                    self.collected_results[
-                        fired_node
-                    ] = result_data
-                    collected = len(
-                        self.collected_results
-                    )
-
-                    print(
-                        f"  [COLLECT/NOTIFY] "
-                        f"{fired_node} Round {cin_round} "
-                        f"({collected}/{self.expected_nodes})"
-                    )
-
-                    if collected >= self.expected_nodes:
+                    if fired_node in self.cold_start_nodes:
+                        # 학습 미참여 노드의 추론 결과.
+                        # FedAvg 대상이 아니므로 집계 대기 수에 넣지 않는다.
+                        self.cold_start_results[fired_node] = result_data
                         print(
-                            "  ✓ all nodes collected "
-                            "by notification -> set event"
+                            f"  [COLD-START/NOTIFY] "
+                            f"{fired_node} Round {cin_round} "
+                            f"val_auroc={result_data.get('val_auroc')} "
+                            f"(학습 미참여, FedAvg 제외)"
                         )
-                        self.collection_event.set()
+                    else:
+                        self.collected_results[
+                            fired_node
+                        ] = result_data
+                        collected = len(
+                            self.collected_results
+                        )
+
+                        print(
+                            f"  [COLLECT/NOTIFY] "
+                            f"{fired_node} Round {cin_round} "
+                            f"({collected}/{self.expected_nodes})"
+                        )
+
+                        if collected >= self.expected_nodes:
+                            print(
+                                "  ✓ all training nodes collected "
+                                "by notification -> set event"
+                            )
+                            self.collection_event.set()
 
                 resp = make_response("", 200)
                 resp.headers["X-M2M-RSC"] = "2000"
@@ -462,7 +498,10 @@ class INAECoordinator:
                     ready.add(node)
                     print(f"    ✓ {node} command subscription ready")
 
-            if len(ready) == self.expected_nodes:
+            # 구독 준비는 '모든 노드'를 기다린다.
+            # cold start 노드도 라운드 명령을 받아야 추론을 할 수 있으므로,
+            # 집계 대기 수(expected_nodes = 학습 노드 수)와는 기준이 다르다.
+            if len(ready) == len(self.node_names):
                 return True
 
             time.sleep(1.0)
@@ -599,10 +638,53 @@ class INAECoordinator:
         data = {
             "type": "global-model",
             "global_round": round_num,
+            # 호환용 필드. 수신측은 아래 weights_b64가 있으면 그쪽을 우선한다.
             "model_path": model_path,
             "model_ready": True,
             "timestamp": time.time(),
         }
+
+        # 글로벌 모델도 con에 실어 배포한다(내려주는 방향도 oneM2M 경유).
+        if getattr(config, "FL_EMBED_WEIGHTS", False):
+            try:
+                enc = model_codec.encode_state_dict(
+                    torch.load(model_path, map_location="cpu"),
+                    fp16=getattr(config, "FL_WEIGHTS_FP16", True),
+                )
+                limit = getattr(config, "FL_MAX_CIN_BYTES", 48 * 1024)
+
+                if enc["weights_bytes"] <= limit:
+                    data.update(enc)
+                    print(
+                        f"    ↓ global weights in con: "
+                        f"{model_codec.describe(enc)}"
+                    )
+                elif getattr(config, "FL_CHUNK_WEIGHTS", True):
+                    manifest = self._publish_weight_chunks(round_num, enc)
+                    if manifest:
+                        data.update(manifest)
+                        print(
+                            f"    ↓ global weights in con: "
+                            f"{model_codec.describe(manifest)} "
+                            f"-> {manifest['weights_chunk_container']}"
+                        )
+                    else:
+                        print(
+                            "    ⚠ 글로벌 조각 업로드 실패 -> model_path 방식"
+                        )
+                else:
+                    print(
+                        f"    ⚠ global weights "
+                        f"{enc['weights_bytes'] / 1024:.0f}KB > "
+                        f"limit {limit / 1024:.0f}KB, 조각 전송 꺼짐 "
+                        f"-> model_path 방식"
+                    )
+            except Exception as exc:
+                print(
+                    f"    ⚠ global weight embedding 실패 "
+                    f"({type(exc).__name__}: {exc}) -> model_path 방식"
+                )
+
         result = om2m.create_content_instance(
             self.global_model_path,
             data
@@ -663,7 +745,7 @@ class INAECoordinator:
         target_nodes = (
             list(nodes)
             if nodes is not None
-            else self.node_names
+            else self.training_nodes
         )
 
         results = {}
@@ -762,6 +844,68 @@ class INAECoordinator:
         return anomalies
 
     # -----------------------
+    # 가중치 조각 (CSE 페이로드 상한 대응)
+    # -----------------------
+    def _ensure_weights_container(self, parent_path: str) -> str:
+        om2m.create_container(
+            parent_path,
+            "cnt-weights",
+            mni=1000,
+            mbs=60_000_000,
+        )
+        return f"{parent_path}/cnt-weights"
+
+    def _make_chunk_fetcher(self, meta: dict):
+        """매니페스트를 보고 조각을 이름으로 직접 RETRIEVE 하는 함수를 만든다."""
+        cnt_path = meta.get("weights_chunk_container")
+        if not cnt_path:
+            return None
+
+        chunk_round = meta.get(
+            "weights_chunk_round",
+            meta.get("round", meta.get("global_round")),
+        )
+
+        def fetch(index: int):
+            res = om2m.get_resource(
+                f"{cnt_path}/"
+                f"{model_codec.chunk_resource_name(chunk_round, index)}"
+            )
+            if not res:
+                return None
+            con = (res.get("m2m:cin") or {}).get("con")
+            try:
+                obj = json.loads(con) if isinstance(con, str) else con
+            except (TypeError, ValueError):
+                return None
+            return (obj or {}).get("d")
+
+        return fetch
+
+    def _publish_weight_chunks(self, round_num: int, enc: dict):
+        """글로벌 모델 가중치를 조각내어 자식 컨테이너에 올리고 매니페스트를 돌려준다."""
+        chunks, manifest = model_codec.split_for_cin(
+            enc,
+            getattr(config, "FL_MAX_CIN_BYTES", 48 * 1024),
+        )
+
+        cnt_path = self._ensure_weights_container(self.global_model_path)
+
+        for i, part in enumerate(chunks):
+            res = om2m.create_content_instance(
+                cnt_path,
+                {"i": i, "d": part},
+                resource_name=model_codec.chunk_resource_name(round_num, i),
+            )
+            if not res:
+                print(f"    ✗ 글로벌 가중치 조각 {i + 1}/{len(chunks)} 실패")
+                return None
+
+        manifest["weights_chunk_container"] = cnt_path
+        manifest["weights_chunk_round"] = round_num
+        return manifest
+
+    # -----------------------
     # Aggregation
     # -----------------------
     def _aggregate(self, results: dict, round_num: int):
@@ -770,10 +914,35 @@ class INAECoordinator:
         state_dicts = {}
         num_samples = {}
         for node, data in results.items():
-            sd = torch.load(data["model_path"], map_location="cpu")
+            # con에 가중치가 실려 왔으면 그것을 쓴다.
+            # 없을 때만 예전 방식(로컬 파일 경로)으로 되돌아간다.
+            sd = None
+            src = "con(base64)"
+            try:
+                sd = model_codec.decode_state_dict(
+                    data,
+                    fetch_chunk=self._make_chunk_fetcher(data),
+                )
+            except Exception as exc:
+                print(
+                    f"    ⚠ {node}: con 가중치 사용 불가 "
+                    f"({type(exc).__name__}: {exc})"
+                )
+
+            if sd is None:
+                path = data.get("model_path")
+                if not path or not os.path.exists(path):
+                    print(
+                        f"    ✗ {node}: con에도 가중치가 없고 "
+                        f"model_path도 쓸 수 없음 -> 이번 라운드 제외"
+                    )
+                    continue
+                sd = torch.load(path, map_location="cpu")
+                src = "model_path"
+
             state_dicts[node] = sd
             num_samples[node] = data["num_samples"]
-            print(f"    ← {node} (n={data['num_samples']})")
+            print(f"    ← {node} (n={data['num_samples']}, via {src})")
 
         anomalies = self._detect_anomaly(results, round_num)
 
@@ -806,10 +975,10 @@ class INAECoordinator:
         return avg_loss, out_path
 
     # -----------------------
-    # Cold-start evaluation
+    # Hidden test evaluation
     # -----------------------
-    def _run_cold_start_eval(self):
-        print("\n=== Cold-start hidden test evaluation ===")
+    def _run_hidden_test_eval(self):
+        print("\n=== Hidden test evaluation (학습 미사용 구간) ===")
 
         if not self.latest_global_model_path or not os.path.exists(self.latest_global_model_path):
             print("  ⚠ final global model not found -> skip evaluation")
@@ -817,12 +986,12 @@ class INAECoordinator:
 
         if not os.path.exists(self.hidden_test_path):
             print(f"  ⚠ hidden test file not found -> {self.hidden_test_path}")
-            print("  ⚠ skip cold-start evaluation")
+            print("  ⚠ skip hidden test evaluation")
             return
 
         if not os.path.exists(self.eval_script_path):
             print(f"  ⚠ evaluation script not found -> {self.eval_script_path}")
-            print("  ⚠ skip cold-start evaluation")
+            print("  ⚠ skip hidden test evaluation")
             return
 
         cmd = [
@@ -843,9 +1012,9 @@ class INAECoordinator:
                 print(proc.stderr.strip())
 
             if proc.returncode == 0:
-                print("  ✓ cold-start hidden test evaluation done")
+                print("  ✓ hidden test evaluation done")
             else:
-                print(f"  ✗ cold-start evaluation failed (returncode={proc.returncode})")
+                print(f"  ✗ hidden test evaluation failed (returncode={proc.returncode})")
 
         except Exception as e:
             print(f"  ✗ evaluation invoke error: {e}")
@@ -892,6 +1061,7 @@ class INAECoordinator:
             self.collection_event.clear()
             with self.collection_lock:
                 self.collected_results = {}
+                self.cold_start_results = {}
 
             # 현재 global model URI를 포함한 round command CIN 생성
             if not self._publish_job_state("FL_TRAINING", r):
@@ -918,7 +1088,7 @@ class INAECoordinator:
             else:
                 missing_nodes = [
                     node
-                    for node in self.node_names
+                    for node in self.training_nodes
                     if node not in results
                 ]
                 print(
@@ -962,7 +1132,7 @@ class INAECoordinator:
 
         print("\nFederated learning completed!")
         self._publish_job_state("FL_COMPLETED", self.max_rounds)
-        self._run_cold_start_eval()
+        self._run_hidden_test_eval()
 
 
 if __name__ == "__main__":
